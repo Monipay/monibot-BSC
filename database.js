@@ -21,7 +21,9 @@ export async function getProfileByXUsername(xUsername) {
   return data;
 }
 
-// Updated to query 'pay_tag' instead of 'monitag'
+/**
+ * Finds a profile by their Monitag (stored as pay_tag in DB)
+ */
 export async function getProfileByMonitag(payTag) {
   // Removing '@' if passed in the argument to ensure clean search
   const cleanTag = payTag.replace('@', '');
@@ -56,9 +58,22 @@ export async function markAsGranted(campaignId, profileId) {
     });
 }
 
-// Updated table name to 'monibot_transactions'
-export async function logTransaction({ sender_id, receiver_id, amount, fee, tx_hash, campaign_id, type }) {
-  await supabase
+/**
+ * Logs a transaction to monibot_transactions.
+ * Includes tweet_id and payer_pay_tag for the OpenClaw Growth Agent.
+ */
+export async function logTransaction({ 
+  sender_id, 
+  receiver_id, 
+  amount, 
+  fee, 
+  tx_hash, 
+  campaign_id, 
+  type,
+  tweet_id,
+  payer_pay_tag
+}) {
+  const { error } = await supabase
     .from('monibot_transactions')
     .insert({
       sender_id,
@@ -68,7 +83,16 @@ export async function logTransaction({ sender_id, receiver_id, amount, fee, tx_h
       tx_hash,
       campaign_id,
       type,
+      tweet_id,        // ID of the tweet to be replied to
+      payer_pay_tag,   // Monitag of the sender
+      replied: false,  // Handshake for OpenClaw Social Agent
       status: 'completed',
       created_at: new Date().toISOString()
     });
+
+  if (error) {
+    console.error('❌ Database log error:', error.message);
+  } else {
+    console.log('💾 Transaction logged successfully for OpenClaw.');
+  }
 }
