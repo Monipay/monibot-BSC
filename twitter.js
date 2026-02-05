@@ -142,7 +142,7 @@ async function processPayTag(payTag, reply, author, campaignTweet, authorProfile
       campaignTweet: campaignTweet.text,
       reply: reply.text,
       replyAuthor: author.username,
-      targetPayTag: payTag, // Updated key to match gemini.js
+      targetPayTag: payTag,
       isNewUser: new Date(targetProfile.created_at) > new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
     });
     
@@ -189,19 +189,25 @@ async function processPayTag(payTag, reply, author, campaignTweet, authorProfile
   }
 }
 
-// Poll for P2P payment commands
+// FIXED: Poll for P2P payment commands
 export async function pollCommands() {
   try {
     console.log('💬 Polling for P2P commands...');
     
-    // Search for mentions of @monibot with "send" or "pay"
-    const mentions = await twitterClient.v2.search({
+    // 1. Build search parameters object
+    const searchParams = {
       query: '@monibot (send OR pay) -is:retweet',
       max_results: 50,
       'tweet.fields': ['author_id', 'created_at'],
-      'user.fields': ['username'],
-      since_id: lastProcessedTweetId
-    });
+      'user.fields': ['username']
+    };
+
+    // 2. Only add since_id if it's NOT null (prevents API error on first run)
+    if (lastProcessedTweetId) {
+      searchParams.since_id = lastProcessedTweetId;
+    }
+
+    const mentions = await twitterClient.v2.search(searchParams);
     
     if (!mentions.data?.data) {
       console.log('No new command mentions found');
@@ -210,10 +216,8 @@ export async function pollCommands() {
     
     console.log(`Found ${mentions.data.data.length} command mentions`);
     
-    // Update last processed
-    if (mentions.data.data.length > 0) {
-      lastProcessedTweetId = mentions.data.meta.newest_id;
-    }
+    // Update last processed with the newest ID found
+    lastProcessedTweetId = mentions.data.meta.newest_id;
     
     // Process each command
     for (const tweet of mentions.data.data) {
@@ -335,6 +339,11 @@ async function processCommand(tweet, author) {
 }
 
 async function getBotUserId() {
-  const me = await twitterClient.v2.me();
-  return me.data.id;
+  try {
+    const me = await twitterClient.v2.me();
+    return me.data.id;
+  } catch (error) {
+    console.error('Error getting bot ID:', error);
+    return process.env.TWITTER_BOT_USER_ID;
+  }
 }
