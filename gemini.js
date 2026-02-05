@@ -4,17 +4,19 @@ let geminiModel;
 
 export function initGemini() {
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  // Using the specific model requested
   geminiModel = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
   console.log('✅ Gemini initialized');
 }
 
 export async function evaluateCampaignReply(context) {
+  // Updated prompt to reference 'pay_tag' instead of 'monitag'
   const prompt = `You are MoniBot, an autonomous marketing fund manager for MoniPay.
 
 CAMPAIGN TWEET: "${context.campaignTweet}"
 REPLY: "${context.reply}"
 REPLY AUTHOR: @${context.replyAuthor}
-TARGET MONITAG: @${context.targetMonitag}
+TARGET PAY TAG: @${context.targetPayTag}
 IS NEW USER: ${context.isNewUser}
 
 EVALUATION CRITERIA:
@@ -37,21 +39,22 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 
   try {
     const result = await geminiModel.generateContent(prompt);
-    const text = result.response.text();
+    const response = await result.response;
+    const text = response.text();
     
     // Clean and parse JSON
     const cleanText = text.replace(/```json|```/g, '').trim();
     const json = JSON.parse(cleanText);
     
-    // Validate
+    // Validate response structure
     if (typeof json.approved !== 'boolean' || typeof json.amount !== 'number') {
-      throw new Error('Invalid response format');
+      throw new Error('Invalid response format from Gemini');
     }
     
     return json;
   } catch (error) {
     console.error('Gemini evaluation error:', error);
-    // Default to rejection on error
+    // Default to rejection on error to prevent safe-fail exploits
     return {
       approved: false,
       amount: 0,
