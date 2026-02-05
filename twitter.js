@@ -23,8 +23,8 @@ export function initTwitterClient() {
   console.log('✅ Twitter client initialized');
 }
 
-// Extract @monitag mentions from text
-function extractMonitags(text) {
+// Extract pay tags (mentions) from text
+function extractPayTags(text) {
   const matches = text.match(/@([a-zA-Z0-9_-]+)/g) || [];
   return matches
     .map(m => m.slice(1).toLowerCase())
@@ -92,14 +92,14 @@ async function processReply(reply, author, campaignTweet) {
   try {
     console.log(`\n📝 Processing reply from @${author.username}`);
     
-    // Extract monitags
-    const monitags = extractMonitags(reply.text);
-    if (monitags.length === 0) {
-      console.log('  ⏭️  No monitags found, skipping');
+    // Extract potential pay tags
+    const payTags = extractPayTags(reply.text);
+    if (payTags.length === 0) {
+      console.log('  ⏭️  No pay tags found, skipping');
       return;
     }
     
-    console.log(`  Found monitags: ${monitags.join(', ')}`);
+    console.log(`  Found tags: ${payTags.join(', ')}`);
     
     // Verify reply author has verified X account
     const authorProfile = await getProfileByXUsername(author.username);
@@ -108,9 +108,9 @@ async function processReply(reply, author, campaignTweet) {
       return;
     }
     
-    // Process each monitag
-    for (const monitag of monitags) {
-      await processMonitag(monitag, reply, author, campaignTweet, authorProfile);
+    // Process each tag
+    for (const tag of payTags) {
+      await processPayTag(tag, reply, author, campaignTweet, authorProfile);
     }
     
   } catch (error) {
@@ -118,21 +118,21 @@ async function processReply(reply, author, campaignTweet) {
   }
 }
 
-async function processMonitag(monitag, reply, author, campaignTweet, authorProfile) {
+async function processPayTag(payTag, reply, author, campaignTweet, authorProfile) {
   try {
-    console.log(`  💎 Processing @${monitag}...`);
+    console.log(`  💎 Processing @${payTag}...`);
     
-    // Check if monitag exists
-    const targetProfile = await getProfileByMonitag(monitag);
+    // Check if pay tag exists in DB
+    const targetProfile = await getProfileByMonitag(payTag);
     if (!targetProfile) {
-      console.log(`    ⏭️  @${monitag} not found in database`);
+      console.log(`    ⏭️  @${payTag} not found in database`);
       return;
     }
     
     // Check if already granted
     const alreadyGranted = await checkIfAlreadyGranted(campaignTweet.id, targetProfile.id);
     if (alreadyGranted) {
-      console.log(`    ⏭️  Already granted to @${monitag} in this campaign`);
+      console.log(`    ⏭️  Already granted to @${payTag} in this campaign`);
       return;
     }
     
@@ -142,7 +142,7 @@ async function processMonitag(monitag, reply, author, campaignTweet, authorProfi
       campaignTweet: campaignTweet.text,
       reply: reply.text,
       replyAuthor: author.username,
-      targetMonitag: monitag,
+      targetPayTag: payTag, // Updated key to match gemini.js
       isNewUser: new Date(targetProfile.created_at) > new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
     });
     
@@ -176,7 +176,7 @@ async function processMonitag(monitag, reply, author, campaignTweet, authorProfi
     });
     
     // Reply to tweet
-    const replyText = `✅ Sent $${netAmount.toFixed(2)} USDC to @${monitag}! TX: ${txHash.slice(0, 10)}...${txHash.slice(-8)}`;
+    const replyText = `✅ Sent $${netAmount.toFixed(2)} USDC to @${payTag}! TX: ${txHash.slice(0, 10)}...${txHash.slice(-8)}`;
     await twitterClient.v2.reply(replyText, reply.id);
     
     console.log(`    💬 Replied to tweet`);
@@ -185,7 +185,7 @@ async function processMonitag(monitag, reply, author, campaignTweet, authorProfi
     await markAsGranted(campaignTweet.id, targetProfile.id);
     
   } catch (error) {
-    console.error(`Error processing monitag @${monitag}:`, error);
+    console.error(`Error processing tag @${payTag}:`, error);
   }
 }
 
@@ -233,25 +233,25 @@ async function processCommand(tweet, author) {
     console.log(`\n⚡ Processing command from @${author.username}`);
     console.log(`   Text: ${tweet.text}`);
     
-    // Parse command (send $X to @monitag)
+    // Parse command (send $X to @paytag)
     const sendMatch = tweet.text.match(/send\s+\$?(\d+\.?\d*)\s+to\s+@?([a-zA-Z0-9_-]+)/i);
     const payMatch = tweet.text.match(/pay\s+@?([a-zA-Z0-9_-]+)\s+\$?(\d+\.?\d*)/i);
     
-    let amount, targetMonitag;
+    let amount, targetPayTag;
     
     if (sendMatch) {
       amount = parseFloat(sendMatch[1]);
-      targetMonitag = sendMatch[2].toLowerCase();
+      targetPayTag = sendMatch[2].toLowerCase();
     } else if (payMatch) {
       amount = parseFloat(payMatch[2]);
-      targetMonitag = payMatch[1].toLowerCase();
+      targetPayTag = payMatch[1].toLowerCase();
     } else {
       console.log('  ⏭️  Could not parse command');
       return;
     }
     
     console.log(`  💰 Amount: $${amount}`);
-    console.log(`  🎯 Target: @${targetMonitag}`);
+    console.log(`  🎯 Target: @${targetPayTag}`);
     
     // Verify sender
     const senderProfile = await getProfileByXUsername(author.username);
@@ -274,15 +274,15 @@ async function processCommand(tweet, author) {
     }
     
     // Verify receiver
-    let receiverProfile = await getProfileByMonitag(targetMonitag);
+    let receiverProfile = await getProfileByMonitag(targetPayTag);
     if (!receiverProfile) {
-      // Try as X username
-      receiverProfile = await getProfileByXUsername(targetMonitag);
+      // Try as X username fallback
+      receiverProfile = await getProfileByXUsername(targetPayTag);
     }
     
     if (!receiverProfile) {
       await twitterClient.v2.reply(
-        `❌ @${targetMonitag} not found on MoniPay!`,
+        `❌ @${targetPayTag} not found on MoniPay!`,
         tweet.id
       );
       return;
@@ -315,7 +315,7 @@ async function processCommand(tweet, author) {
     
     // Reply
     await twitterClient.v2.reply(
-      `✅ @${author.username} sent $${netAmount.toFixed(2)} to @${targetMonitag}! TX: ${txHash.slice(0, 10)}...${txHash.slice(-8)}`,
+      `✅ @${author.username} sent $${netAmount.toFixed(2)} to @${targetPayTag}! TX: ${txHash.slice(0, 10)}...${txHash.slice(-8)}`,
       tweet.id
     );
     
