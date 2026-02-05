@@ -15,7 +15,8 @@ const requiredEnvVars = [
   'MONIBOT_PRIVATE_KEY',
   'MONIBOT_PROFILE_ID',
   'SUPABASE_URL',
-  'SUPABASE_SERVICE_KEY'
+  'SUPABASE_SERVICE_KEY',
+  'MONIBOT_WALLET_ADDRESS'
 ];
 
 for (const envVar of requiredEnvVars) {
@@ -28,7 +29,7 @@ for (const envVar of requiredEnvVars) {
 console.log('🤖 MoniBot Starting...');
 console.log('📍 Profile ID:', process.env.MONIBOT_PROFILE_ID);
 console.log('💰 Wallet:', process.env.MONIBOT_WALLET_ADDRESS);
-console.log('⚙️  Poll Interval:', process.env.POLL_INTERVAL_MS, 'ms');
+console.log('⚙️  Poll Interval:', process.env.POLL_INTERVAL_MS || 60000, 'ms');
 
 // Initialize services
 initTwitterClient();
@@ -62,4 +63,5 @@ async function mainLoop() {
 mainLoop();
 setInterval(mainLoop, parseInt(process.env.POLL_INTERVAL_MS) || 60000);
 
+console.log('🚀 MoniBot is now running!');
 console.log('🚀 MoniBot is now running!');
