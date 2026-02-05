@@ -55,7 +55,7 @@ export async function pollCampaigns() {
     }
     
   } catch (error) {
-    console.error('Error polling campaigns:', error);
+    console.error('Error polling campaigns:', error.message);
   }
 }
 
@@ -75,16 +75,13 @@ async function processCampaignTweet(campaignTweet) {
     
     for (const reply of replies.data.data) {
       const author = replies.includes?.users?.find(u => u.id === reply.author_id);
-      if (!author) {
-        console.log(`  ⚠️ Could not find author for reply ${reply.id}`);
-        continue;
-      }
+      if (!author) continue;
       
       await processReply(reply, author, campaignTweet);
     }
     
   } catch (error) {
-    console.error(`Error processing campaign tweet ${campaignTweet.id}:`, error);
+    console.error(`Error processing campaign tweet ${campaignTweet.id}:`, error.message);
   }
 }
 
@@ -98,8 +95,6 @@ async function processReply(reply, author, campaignTweet) {
       return;
     }
     
-    console.log(`  Found tags: ${payTags.join(', ')}`);
-    
     const authorProfile = await getProfileByXUsername(author.username);
     if (!authorProfile || !authorProfile.x_verified) {
       console.log(`  ⏭️  @${author.username} not verified, skipping`);
@@ -111,27 +106,18 @@ async function processReply(reply, author, campaignTweet) {
     }
     
   } catch (error) {
-    console.error('Error processing reply:', error);
+    console.error('Error processing reply:', error.message);
   }
 }
 
 async function processPayTag(payTag, reply, author, campaignTweet, authorProfile) {
   try {
-    console.log(`  💎 Processing @${payTag}...`);
-    
     const targetProfile = await getProfileByMonitag(payTag);
-    if (!targetProfile) {
-      console.log(`    ⏭️  @${payTag} not found in database`);
-      return;
-    }
-    
+    if (!targetProfile) return;
+
     const alreadyGranted = await checkIfAlreadyGranted(campaignTweet.id, targetProfile.id);
-    if (alreadyGranted) {
-      console.log(`    ⏭️  Already granted to @${payTag} in this campaign`);
-      return;
-    }
-    
-    console.log(`    🤖 Evaluating with Gemini...`);
+    if (alreadyGranted) return;
+
     const evaluation = await evaluateCampaignReply({
       campaignTweet: campaignTweet.text,
       reply: reply.text,
@@ -139,40 +125,41 @@ async function processPayTag(payTag, reply, author, campaignTweet, authorProfile
       targetPayTag: payTag,
       isNewUser: new Date(targetProfile.created_at) > new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
     });
-    
+
     if (!evaluation.approved) {
-      console.log(`    ❌ Rejected: ${evaluation.reasoning}`);
+      console.log(`    ❌ Gemini rejected @${payTag}: ${evaluation.reasoning}`);
       return;
     }
-    
-    console.log(`    ✅ Approved: $${evaluation.amount} - ${evaluation.reasoning}`);
-    
+
     const grantAmount = evaluation.amount;
     const fee = grantAmount * (parseFloat(process.env.GRANT_FEE_PERCENT) / 100);
     const netAmount = grantAmount - fee;
+
+    console.log(`    💸 Attempting grant transfer: $${netAmount.toFixed(2)} to @${payTag}`);
     
-    console.log(`    💸 Transferring $${netAmount.toFixed(2)} (fee: $${fee.toFixed(2)})...`);
-    const txHash = await transferUSDC(targetProfile.wallet_address, netAmount);
-    console.log(`    ✅ Transfer complete: ${txHash}`);
-    
-    // NEW LOGGING FOR OPENCLAW
-    await logTransaction({
-      sender_id: process.env.MONIBOT_PROFILE_ID,
-      receiver_id: targetProfile.id,
-      amount: netAmount,
-      fee: fee,
-      tx_hash: txHash,
-      campaign_id: campaignTweet.id,
-      type: 'grant',
-      tweet_id: reply.id,      // Saved for Social Agent
-      payer_pay_tag: 'MoniBot' // Grant comes from the bot
-    });
-    
-    await markAsGranted(campaignTweet.id, targetProfile.id);
-    console.log(`    💾 Saved to DB. OpenClaw will handle the reply.`);
+    try {
+      const txHash = await transferUSDC(targetProfile.wallet_address, netAmount);
+      
+      await logTransaction({
+        sender_id: process.env.MONIBOT_PROFILE_ID,
+        receiver_id: targetProfile.id,
+        amount: netAmount,
+        fee: fee,
+        tx_hash: txHash,
+        campaign_id: campaignTweet.id,
+        type: 'grant',
+        tweet_id: reply.id,
+        payer_pay_tag: 'MoniBot'
+      });
+      
+      await markAsGranted(campaignTweet.id, targetProfile.id);
+      console.log(`    ✅ Grant successful. TX: ${txHash}`);
+    } catch (txError) {
+      console.error(`    ❌ Blockchain Error for @${payTag}:`, txError.message);
+    }
     
   } catch (error) {
-    console.error(`Error processing tag @${payTag}:`, error);
+    console.error(`Error processing tag @${payTag}:`, error.message);
   }
 }
 
@@ -209,14 +196,13 @@ export async function pollCommands() {
     }
     
   } catch (error) {
-    console.error('Error polling commands:', error);
+    console.error('Error polling commands:', error.message);
   }
 }
 
 async function processCommand(tweet, author) {
   try {
     console.log(`\n⚡ Processing command from @${author.username}`);
-    console.log(`   Text: ${tweet.text}`);
     
     const sendMatch = tweet.text.match(/send\s+\$?(\d+\.?\d*)\s+to\s+@?([a-zA-Z0-9_-]+)/i);
     const payMatch = tweet.text.match(/pay\s+@?([a-zA-Z0-9_-]+)\s+\$?(\d+\.?\d*)/i);
@@ -240,9 +226,13 @@ async function processCommand(tweet, author) {
       return;
     }
     
+    const feePercent = parseFloat(process.env.GRANT_FEE_PERCENT) || 1;
+    const fee = amount * (feePercent / 100);
+    const totalNeeded = amount + fee;
+
     const allowance = await getOnchainAllowance(senderProfile.wallet_address);
-    if (allowance < amount) {
-      console.log(`  ❌ Insufficient allowance for @${author.username}: ${allowance}`);
+    if (allowance < totalNeeded) {
+      console.log(`  ❌ Insufficient allowance for @${author.username}: Needed ${totalNeeded}, have ${allowance}`);
       return;
     }
     
@@ -254,34 +244,34 @@ async function processCommand(tweet, author) {
       return;
     }
     
-    const fee = amount * (parseFloat(process.env.GRANT_FEE_PERCENT) / 100);
-    const netAmount = amount - fee;
+    console.log(`  💸 Attempting transfer: ${senderProfile.pay_tag} -> ${targetPayTag}`);
     
-    console.log(`  💸 Executing transferFrom...`);
-    const txHash = await transferFromUSDC(
-      senderProfile.wallet_address,
-      receiverProfile.wallet_address,
-      netAmount,
-      fee
-    );
-    console.log(`  ✅ Transfer complete: ${txHash}`);
-    
-    // NEW LOGGING FOR OPENCLAW
-    await logTransaction({
-      sender_id: senderProfile.id,
-      receiver_id: receiverProfile.id,
-      amount: netAmount,
-      fee: fee,
-      tx_hash: txHash,
-      type: 'p2p_command',
-      tweet_id: tweet.id,               // Saved for Social Agent
-      payer_pay_tag: senderProfile.pay_tag // Save the sender's tag
-    });
-    
-    console.log(`  💾 Saved P2P to DB. OpenClaw will handle the reply.`);
+    try {
+      const txHash = await transferFromUSDC(
+        senderProfile.wallet_address,
+        receiverProfile.wallet_address,
+        amount,
+        fee
+      );
+
+      await logTransaction({
+        sender_id: senderProfile.id,
+        receiver_id: receiverProfile.id,
+        amount: amount,
+        fee: fee,
+        tx_hash: txHash,
+        type: 'p2p_command',
+        tweet_id: tweet.id,
+        payer_pay_tag: senderProfile.pay_tag
+      });
+      
+      console.log(`  ✅ P2P successful. TX: ${txHash}`);
+    } catch (txError) {
+      console.error(`  ❌ Blockchain Error for command from @${author.username}:`, txError.message);
+    }
     
   } catch (error) {
-    console.error('Error processing command:', error);
+    console.error('Error processing command:', error.message);
   }
 }
 
