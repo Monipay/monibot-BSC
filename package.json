@@ -1,0 +1,21 @@
+{
+  "name": "monibot",
+  "version": "1.0.0",
+  "description": "Autonomous AI marketing agent for MoniPay",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "dependencies": {
+    "twitter-api-v2": "^1.17.2",
+    "@google/generative-ai": "^0.21.0",
+    "viem": "^2.21.45",
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
