@@ -1,5 +1,5 @@
 import { TwitterApi } from 'twitter-api-v2';
-import { evaluateCampaignReply, evaluateP2PCommand } from './gemini.js';
+import { evaluateCampaignReply } from './gemini.js';
 import { 
   getProfileByXUsername, 
   getProfileByMonitag, 
