@@ -21,11 +21,15 @@ export async function getProfileByXUsername(xUsername) {
   return data;
 }
 
-export async function getProfileByMonitag(monitag) {
+// Updated to query 'pay_tag' instead of 'monitag'
+export async function getProfileByMonitag(payTag) {
+  // Removing '@' if passed in the argument to ensure clean search
+  const cleanTag = payTag.replace('@', '');
+
   const { data } = await supabase
     .from('profiles')
     .select('*')
-    .ilike('monitag', monitag)
+    .ilike('pay_tag', cleanTag) 
     .single();
   
   return data;
@@ -52,9 +56,10 @@ export async function markAsGranted(campaignId, profileId) {
     });
 }
 
+// Updated table name to 'monibot_transactions'
 export async function logTransaction({ sender_id, receiver_id, amount, fee, tx_hash, campaign_id, type }) {
   await supabase
-    .from('transactions')
+    .from('monibot_transactions')
     .insert({
       sender_id,
       receiver_id,
