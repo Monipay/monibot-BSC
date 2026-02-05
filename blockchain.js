@@ -16,10 +16,9 @@ const walletClient = createWalletClient({
 const USDC_ADDRESS = process.env.USDC_ADDRESS;
 
 /**
- * Transfer USDC from MoniBot's wallet (used for Campaign Grants)
+ * Transfer USDC from MoniBot's wallet (for Campaign Grants)
  */
 export async function transferUSDC(toAddress, amount) {
-  // Ensure we only use 6 decimals for USDC
   const amountInUnits = parseUnits(amount.toFixed(6), 6);
   
   const hash = await walletClient.writeContract({
@@ -35,15 +34,15 @@ export async function transferUSDC(toAddress, amount) {
 }
 
 /**
- * Transfer USDC using user's allowance (used for P2P commands)
- * Includes Pre-flight Balance and Allowance checks to prevent crashes
+ * Transfer USDC using user's allowance (for P2P commands)
+ * Includes Pre-flight Balance and Allowance checks
  */
 export async function transferFromUSDC(fromAddress, toAddress, amount, fee) {
   const amountInUnits = parseUnits(amount.toFixed(6), 6);
   const feeInUnits = parseUnits(fee.toFixed(6), 6);
   const totalInUnits = amountInUnits + feeInUnits;
 
-  // --- PRE-FLIGHT CHECKS (Debugging) ---
+  // --- ON-CHAIN PRE-FLIGHT CHECK ---
   const [balance, allowance] = await Promise.all([
     publicClient.readContract({
       address: USDC_ADDRESS,
@@ -60,16 +59,16 @@ export async function transferFromUSDC(fromAddress, toAddress, amount, fee) {
   ]);
 
   console.log(`  🔍 On-chain Check for ${fromAddress}:`);
-  console.log(`     Actual Balance: ${formatUnits(balance, 6)} USDC`);
-  console.log(`     Actual Allowance: ${formatUnits(allowance, 6)} USDC`);
-  console.log(`     Required Total: ${formatUnits(totalInUnits, 6)} USDC`);
+  console.log(`     Balance: ${formatUnits(balance, 6)} USDC`);
+  console.log(`     Allowance: ${formatUnits(allowance, 6)} USDC`);
+  console.log(`     Needed: ${formatUnits(totalInUnits, 6)} USDC`);
 
   if (balance < totalInUnits) {
-    throw new Error(`Blockchain: User balance (${formatUnits(balance, 6)}) is lower than total needed (${formatUnits(totalInUnits, 6)})`);
+    throw new Error(`Insufficient Balance: User has ${formatUnits(balance, 6)}`);
   }
 
   if (allowance < totalInUnits) {
-    throw new Error(`Blockchain: User allowance (${formatUnits(allowance, 6)}) is lower than total needed (${formatUnits(totalInUnits, 6)})`);
+    throw new Error(`Insufficient Allowance: User approved ${formatUnits(allowance, 6)}`);
   }
 
   // --- EXECUTION ---
@@ -82,7 +81,6 @@ export async function transferFromUSDC(fromAddress, toAddress, amount, fee) {
     args: [fromAddress, toAddress, amountInUnits]
   });
   
-  console.log(`     ✅ Step 1: Net transfer sent. Hash: ${hash}`);
   await publicClient.waitForTransactionReceipt({ hash });
   
   // 2. Transfer Fee to MoniBot
@@ -94,7 +92,6 @@ export async function transferFromUSDC(fromAddress, toAddress, amount, fee) {
       args: [fromAddress, process.env.MONIBOT_WALLET_ADDRESS, feeInUnits]
     });
     
-    console.log(`     ✅ Step 2: Fee transfer sent. Hash: ${feeHash}`);
     await publicClient.waitForTransactionReceipt({ hash: feeHash });
   }
   
@@ -113,5 +110,4 @@ export async function getOnchainAllowance(userAddress) {
   });
   
   return parseFloat(formatUnits(allowance, 6));
-}
 }
