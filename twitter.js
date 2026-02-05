@@ -4,6 +4,7 @@ import {
   getProfileByXUsername, 
   getProfileByMonitag, 
   checkIfAlreadyGranted,
+  checkIfCommandProcessed, // Added for double-spend protection
   markAsGranted,
   logTransaction 
 } from './database.js';
@@ -95,6 +96,8 @@ async function processReply(reply, author, campaignTweet) {
       return;
     }
     
+    console.log(`  Found tags: ${payTags.join(', ')}`);
+    
     const authorProfile = await getProfileByXUsername(author.username);
     if (!authorProfile || !authorProfile.x_verified) {
       console.log(`  ⏭️  @${author.username} not verified, skipping`);
@@ -115,8 +118,12 @@ async function processPayTag(payTag, reply, author, campaignTweet, authorProfile
     const targetProfile = await getProfileByMonitag(payTag);
     if (!targetProfile) return;
 
+    // Campaign Protection: Check if this user already got a grant for this tweet
     const alreadyGranted = await checkIfAlreadyGranted(campaignTweet.id, targetProfile.id);
-    if (alreadyGranted) return;
+    if (alreadyGranted) {
+      console.log(`    ⏭️  User ${payTag} already granted for this campaign, skipping`);
+      return;
+    }
 
     const evaluation = await evaluateCampaignReply({
       campaignTweet: campaignTweet.text,
@@ -202,6 +209,14 @@ export async function pollCommands() {
 
 async function processCommand(tweet, author) {
   try {
+    // --- DOUBLE-SPEND PROTECTION ---
+    // Check if this specific tweet ID has already been logged in our transaction table
+    const alreadyProcessed = await checkIfCommandProcessed(tweet.id);
+    if (alreadyProcessed) {
+      console.log(`  ⏭️  P2P Command ${tweet.id} already processed (found in DB), skipping`);
+      return;
+    }
+
     console.log(`\n⚡ Processing command from @${author.username}`);
     
     const sendMatch = tweet.text.match(/send\s+\$?(\d+\.?\d*)\s+to\s+@?([a-zA-Z0-9_-]+)/i);
