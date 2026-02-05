@@ -63,12 +63,13 @@ export async function pollCampaigns() {
 
 async function processCampaignTweet(campaignTweet) {
   try {
-    // Get replies to this tweet
+    // Get replies to this tweet - FIXED: added expansions
     const replies = await twitterClient.v2.search({
       query: `conversation_id:${campaignTweet.id}`,
       max_results: 100,
       'tweet.fields': ['author_id', 'created_at'],
-      'user.fields': ['username']
+      'user.fields': ['username'],
+      expansions: ['author_id']
     });
     
     if (!replies.data?.data) return;
@@ -78,7 +79,10 @@ async function processCampaignTweet(campaignTweet) {
     // Process each reply
     for (const reply of replies.data.data) {
       const author = replies.includes?.users?.find(u => u.id === reply.author_id);
-      if (!author) continue;
+      if (!author) {
+        console.log(`  ⚠️ Could not find author for reply ${reply.id}`);
+        continue;
+      }
       
       await processReply(reply, author, campaignTweet);
     }
@@ -199,7 +203,8 @@ export async function pollCommands() {
       query: '@monibot (send OR pay) -is:retweet',
       max_results: 50,
       'tweet.fields': ['author_id', 'created_at'],
-      'user.fields': ['username']
+      'user.fields': ['username'],
+      expansions: ['author_id'] // FIXED: Added this to get author details
     };
 
     // 2. Only add since_id if it's NOT null (prevents API error on first run)
@@ -221,8 +226,12 @@ export async function pollCommands() {
     
     // Process each command
     for (const tweet of mentions.data.data) {
+      // Find the user object in the 'includes' data returned by expansions
       const author = mentions.includes?.users?.find(u => u.id === tweet.author_id);
-      if (!author) continue;
+      if (!author) {
+        console.log(`  ⚠️ Could not find author for command ${tweet.id}`);
+        continue;
+      }
       
       await processCommand(tweet, author);
     }
@@ -260,6 +269,7 @@ async function processCommand(tweet, author) {
     // Verify sender
     const senderProfile = await getProfileByXUsername(author.username);
     if (!senderProfile || !senderProfile.x_verified) {
+      console.log(`  ❌ Sender @${author.username} not verified in DB`);
       await twitterClient.v2.reply(
         `❌ You need to verify your X account in MoniPay first! Visit monipay.xyz/settings`,
         tweet.id
@@ -270,6 +280,7 @@ async function processCommand(tweet, author) {
     // Check allowance
     const allowance = await getOnchainAllowance(senderProfile.wallet_address);
     if (allowance < amount) {
+      console.log(`  ❌ Insufficient allowance for @${author.username}: ${allowance}`);
       await twitterClient.v2.reply(
         `❌ Insufficient allowance! You have $${allowance.toFixed(2)} approved. Increase it at monipay.xyz/settings`,
         tweet.id
@@ -285,6 +296,7 @@ async function processCommand(tweet, author) {
     }
     
     if (!receiverProfile) {
+      console.log(`  ❌ Target @${targetPayTag} not found in DB`);
       await twitterClient.v2.reply(
         `❌ @${targetPayTag} not found on MoniPay!`,
         tweet.id
