@@ -43,7 +43,21 @@ export async function checkIfAlreadyGranted(campaignId, profileId) {
     .select('id')
     .eq('campaign_id', campaignId)
     .eq('profile_id', profileId)
-    .single();
+    .maybeSingle(); // Used maybeSingle to handle 'not found' gracefully
+  
+  return !!data;
+}
+
+/**
+ * NEW: Checks if a specific P2P tweet command has already been processed.
+ * This prevents double payments on bot restarts/redeploys.
+ */
+export async function checkIfCommandProcessed(tweetId) {
+  const { data } = await supabase
+    .from('monibot_transactions')
+    .select('id')
+    .eq('tweet_id', tweetId)
+    .maybeSingle();
   
   return !!data;
 }
