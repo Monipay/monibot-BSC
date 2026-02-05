@@ -4,7 +4,7 @@ import {
   getProfileByXUsername, 
   getProfileByMonitag, 
   checkIfAlreadyGranted,
-  checkIfCommandProcessed, // Added for double-spend protection
+  checkIfCommandProcessed,
   markAsGranted,
   logTransaction 
 } from './database.js';
@@ -24,7 +24,9 @@ export function initTwitterClient() {
   console.log('✅ Twitter client initialized (Silent Worker Mode)');
 }
 
-// Extract tags (mentions) from text
+/**
+ * Extracts @mentions from tweet text, excluding the bot itself.
+ */
 function extractPayTags(text) {
   const matches = text.match(/@([a-zA-Z0-9_-]+)/g) || [];
   return matches
@@ -32,7 +34,10 @@ function extractPayTags(text) {
     .filter(m => m !== 'monibot'); 
 }
 
-// Poll for campaign replies
+/**
+ * Loop 1: Campaign Replies
+ * Fetches recent bot tweets and processes replies for grants.
+ */
 export async function pollCampaigns() {
   try {
     console.log('📊 Polling for campaign replies...');
@@ -47,16 +52,15 @@ export async function pollCampaigns() {
     );
     
     if (!myTweets.data?.data) {
-      console.log('No recent tweets found');
+      console.log('   No recent tweets found.');
       return;
     }
     
     for (const tweet of myTweets.data.data) {
       await processCampaignTweet(tweet);
     }
-    
   } catch (error) {
-    console.error('Error polling campaigns:', error.message);
+    console.error('❌ Error polling campaigns:', error.message);
   }
 }
 
@@ -72,7 +76,7 @@ async function processCampaignTweet(campaignTweet) {
     
     if (!replies.data?.data) return;
     
-    console.log(`Found ${replies.data.data.length} replies to tweet ${campaignTweet.id}`);
+    console.log(`🔎 Found ${replies.data.data.length} replies to campaign ${campaignTweet.id}`);
     
     for (const reply of replies.data.data) {
       const author = replies.includes?.users?.find(u => u.id === reply.author_id);
@@ -80,51 +84,63 @@ async function processCampaignTweet(campaignTweet) {
       
       await processReply(reply, author, campaignTweet);
     }
-    
   } catch (error) {
-    console.error(`Error processing campaign tweet ${campaignTweet.id}:`, error.message);
+    console.error(`❌ Error processing replies for ${campaignTweet.id}:`, error.message);
   }
 }
 
 async function processReply(reply, author, campaignTweet) {
   try {
+    // 1. Double-Spend Protection: Has this reply already been handled?
+    const alreadyHandled = await checkIfCommandProcessed(reply.id);
+    if (alreadyHandled) return;
+
     console.log(`\n📝 Processing reply from @${author.username}`);
     
     const payTags = extractPayTags(reply.text);
     if (payTags.length === 0) {
-      console.log('  ⏭️  No pay tags found, skipping');
+      console.log('   ⏭️ No pay tags found, skipping.');
       return;
     }
     
-    console.log(`  Found tags: ${payTags.join(', ')}`);
-    
     const authorProfile = await getProfileByXUsername(author.username);
     if (!authorProfile || !authorProfile.x_verified) {
-      console.log(`  ⏭️  @${author.username} not verified, skipping`);
+      console.log(`   ⏭️ @${author.username} not verified in MoniPay, skipping.`);
       return;
     }
     
     for (const tag of payTags) {
       await processPayTag(tag, reply, author, campaignTweet, authorProfile);
     }
-    
   } catch (error) {
-    console.error('Error processing reply:', error.message);
+    console.error('❌ Error in processReply:', error.message);
   }
 }
 
 async function processPayTag(payTag, reply, author, campaignTweet, authorProfile) {
   try {
+    console.log(`   💎 Checking tag @${payTag}...`);
+    
     const targetProfile = await getProfileByMonitag(payTag);
-    if (!targetProfile) return;
-
-    // Campaign Protection: Check if this user already got a grant for this tweet
-    const alreadyGranted = await checkIfAlreadyGranted(campaignTweet.id, targetProfile.id);
-    if (alreadyGranted) {
-      console.log(`    ⏭️  User ${payTag} already granted for this campaign, skipping`);
+    if (!targetProfile) {
+      console.log(`      ⏭️ Tag @${payTag} not found in database.`);
+      // Optional: Log failure so agent can tell user to register
+      await logTransaction({
+        sender_id: process.env.MONIBOT_PROFILE_ID,
+        receiver_id: authorProfile.id, 
+        amount: 0, fee: 0, tx_hash: 'ERROR_TARGET_NOT_FOUND',
+        type: 'grant', tweet_id: reply.id, payer_pay_tag: 'MoniBot'
+      });
       return;
     }
 
+    const alreadyGranted = await checkIfAlreadyGranted(campaignTweet.id, targetProfile.id);
+    if (alreadyGranted) {
+      console.log(`      ⏭️ Grant already issued to ${payTag} for this campaign.`);
+      return;
+    }
+
+    console.log(`      🤖 Evaluating with Gemini...`);
     const evaluation = await evaluateCampaignReply({
       campaignTweet: campaignTweet.text,
       reply: reply.text,
@@ -134,15 +150,21 @@ async function processPayTag(payTag, reply, author, campaignTweet, authorProfile
     });
 
     if (!evaluation.approved) {
-      console.log(`    ❌ Gemini rejected @${payTag}: ${evaluation.reasoning}`);
+      console.log(`      ❌ Rejected: ${evaluation.reasoning}`);
+      await logTransaction({
+        sender_id: process.env.MONIBOT_PROFILE_ID,
+        receiver_id: targetProfile.id,
+        amount: 0, fee: 0, tx_hash: 'AI_REJECTED',
+        type: 'grant', tweet_id: reply.id, payer_pay_tag: 'MoniBot'
+      });
       return;
     }
 
     const grantAmount = evaluation.amount;
-    const fee = grantAmount * (parseFloat(process.env.GRANT_FEE_PERCENT) / 100);
+    const fee = grantAmount * (parseFloat(process.env.GRANT_FEE_PERCENT || 1) / 100);
     const netAmount = grantAmount - fee;
 
-    console.log(`    💸 Attempting grant transfer: $${netAmount.toFixed(2)} to @${payTag}`);
+    console.log(`      💸 Transferring $${netAmount.toFixed(2)} to ${payTag}...`);
     
     try {
       const txHash = await transferUSDC(targetProfile.wallet_address, netAmount);
@@ -160,16 +182,25 @@ async function processPayTag(payTag, reply, author, campaignTweet, authorProfile
       });
       
       await markAsGranted(campaignTweet.id, targetProfile.id);
-      console.log(`    ✅ Grant successful. TX: ${txHash}`);
+      console.log(`      ✅ Grant Success! TX: ${txHash}`);
     } catch (txError) {
-      console.error(`    ❌ Blockchain Error for @${payTag}:`, txError.message);
+      console.error(`      ❌ Blockchain Revert:`, txError.message);
+      await logTransaction({
+        sender_id: process.env.MONIBOT_PROFILE_ID,
+        receiver_id: targetProfile.id,
+        amount: 0, fee: 0, tx_hash: 'ERROR_TREASURY_EMPTY',
+        type: 'grant', tweet_id: reply.id, payer_pay_tag: 'MoniBot'
+      });
     }
-    
   } catch (error) {
-    console.error(`Error processing tag @${payTag}:`, error.message);
+    console.error(`❌ Error processing @${payTag}:`, error.message);
   }
 }
 
+/**
+ * Loop 2: P2P Commands
+ * Searches for @monibot mentions with "send" or "pay".
+ */
 export async function pollCommands() {
   try {
     console.log('💬 Polling for P2P commands...');
@@ -189,35 +220,32 @@ export async function pollCommands() {
     const mentions = await twitterClient.v2.search(searchParams);
     
     if (!mentions.data?.data) {
-      console.log('No new command mentions found');
+      console.log('   No new command mentions found.');
       return;
     }
     
-    console.log(`Found ${mentions.data.data.length} command mentions`);
+    console.log(`🔎 Found ${mentions.data.data.length} potential commands.`);
     lastProcessedTweetId = mentions.data.meta.newest_id;
     
     for (const tweet of mentions.data.data) {
       const author = mentions.includes?.users?.find(u => u.id === tweet.author_id);
-      if (!author) continue;
-      await processCommand(tweet, author);
+      if (author) await processCommand(tweet, author);
     }
-    
   } catch (error) {
-    console.error('Error polling commands:', error.message);
+    console.error('❌ Error polling commands:', error.message);
   }
 }
 
 async function processCommand(tweet, author) {
   try {
-    // --- DOUBLE-SPEND PROTECTION ---
-    // Check if this specific tweet ID has already been logged in our transaction table
-    const alreadyProcessed = await checkIfCommandProcessed(tweet.id);
-    if (alreadyProcessed) {
-      console.log(`  ⏭️  P2P Command ${tweet.id} already processed (found in DB), skipping`);
+    // 1. Double-Spend Protection: Was this command already processed?
+    const alreadyHandled = await checkIfCommandProcessed(tweet.id);
+    if (alreadyHandled) {
+      console.log(`   ⏭️ Command ${tweet.id} already in DB, skipping.`);
       return;
     }
 
-    console.log(`\n⚡ Processing command from @${author.username}`);
+    console.log(`\n⚡ Processing P2P command from @${author.username}`);
     
     const sendMatch = tweet.text.match(/send\s+\$?(\d+\.?\d*)\s+to\s+@?([a-zA-Z0-9_-]+)/i);
     const payMatch = tweet.text.match(/pay\s+@?([a-zA-Z0-9_-]+)\s+\$?(\d+\.?\d*)/i);
@@ -231,35 +259,50 @@ async function processCommand(tweet, author) {
       amount = parseFloat(payMatch[2]);
       targetPayTag = payMatch[1].toLowerCase();
     } else {
-      console.log('  ⏭️  Could not parse command');
+      console.log('   ⏭️ Could not parse command syntax.');
       return;
     }
     
+    console.log(`   💰 Amount: $${amount} | Target: @${targetPayTag}`);
+
+    // Verify Sender
     const senderProfile = await getProfileByXUsername(author.username);
-    if (!senderProfile || !senderProfile.x_verified) {
-      console.log(`  ❌ Sender @${author.username} not verified in DB`);
+    if (!senderProfile) {
+      console.log(`   ❌ Sender @${author.username} not found/verified.`);
       return;
     }
     
-    const feePercent = parseFloat(process.env.GRANT_FEE_PERCENT) || 1;
+    const feePercent = parseFloat(process.env.GRANT_FEE_PERCENT || 1);
     const fee = amount * (feePercent / 100);
     const totalNeeded = amount + fee;
 
+    // Verify On-chain Allowance
     const allowance = await getOnchainAllowance(senderProfile.wallet_address);
     if (allowance < totalNeeded) {
-      console.log(`  ❌ Insufficient allowance for @${author.username}: Needed ${totalNeeded}, have ${allowance}`);
+      console.log(`   ❌ Insufficient Allowance: Need $${totalNeeded}, have $${allowance}`);
+      await logTransaction({
+        sender_id: senderProfile.id,
+        receiver_id: senderProfile.id,
+        amount: amount, fee: fee, tx_hash: 'ERROR_ALLOWANCE',
+        type: 'p2p_command', tweet_id: tweet.id, payer_pay_tag: senderProfile.pay_tag
+      });
       return;
     }
     
-    let receiverProfile = await getProfileByMonitag(targetPayTag);
-    if (!receiverProfile) receiverProfile = await getProfileByXUsername(targetPayTag);
-    
+    // Verify Receiver
+    let receiverProfile = await getProfileByMonitag(targetPayTag) || await getProfileByXUsername(targetPayTag);
     if (!receiverProfile) {
-      console.log(`  ❌ Target @${targetPayTag} not found in DB`);
+      console.log(`   ❌ Target @${targetPayTag} not found in MoniPay.`);
+      await logTransaction({
+        sender_id: senderProfile.id,
+        receiver_id: senderProfile.id,
+        amount: amount, fee: fee, tx_hash: 'ERROR_TARGET_NOT_FOUND',
+        type: 'p2p_command', tweet_id: tweet.id, payer_pay_tag: senderProfile.pay_tag
+      });
       return;
     }
     
-    console.log(`  💸 Attempting transfer: ${senderProfile.pay_tag} -> ${targetPayTag}`);
+    console.log(`   💸 Executing transfer: ${senderProfile.pay_tag} -> ${targetPayTag}`);
     
     try {
       const txHash = await transferFromUSDC(
@@ -280,13 +323,19 @@ async function processCommand(tweet, author) {
         payer_pay_tag: senderProfile.pay_tag
       });
       
-      console.log(`  ✅ P2P successful. TX: ${txHash}`);
+      console.log(`   ✅ P2P Success! TX: ${txHash}`);
     } catch (txError) {
-      console.error(`  ❌ Blockchain Error for command from @${author.username}:`, txError.message);
+      console.error(`   ❌ Blockchain Revert:`, txError.message);
+      const errType = txError.message.includes('Balance') ? 'ERROR_BALANCE' : 'ERROR_BLOCKCHAIN';
+      await logTransaction({
+        sender_id: senderProfile.id,
+        receiver_id: receiverProfile.id,
+        amount: amount, fee: fee, tx_hash: errType,
+        type: 'p2p_command', tweet_id: tweet.id, payer_pay_tag: senderProfile.pay_tag
+      });
     }
-    
   } catch (error) {
-    console.error('Error processing command:', error.message);
+    console.error('❌ Error in processCommand:', error.message);
   }
 }
 
