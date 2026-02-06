@@ -1,117 +1,94 @@
-# MoniBot - Monipay's Social Layer & VP of Growth 🤖
+# MoniBot 🤖 - Monipay's Autonomous Transaction Layer
 
-## 📂 FULL CODE BREAKDOWN
+**MoniBot** is the core Worker (Backend) for Monipay's on-chain social layer. It is a **silent, resilient** service responsible for all USDC transfers and transaction logging. Its public-facing interaction is handled by its twin: **MoniBot-VP-Social**.
 
-### 1. `index.js` (Main Bot Loop)
-Think of it as the "brain" that coordinates everything.
-- Loads environment variables.
-- Initializes Twitter, Gemini, and Supabase clients.
-- **Runs main loop every 60 seconds:**
-  - Polls for campaign replies.
-  - Polls for P2P payment commands.
+## 🔗 Architecture Overview: The Two-Bot System
 
-### 2. `twitter.js` (Twitter Integration)
-**`pollCampaigns()`**
-- Gets MoniBot's recent tweets (campaign announcements) Openclaw Agent.
-- For each campaign tweet, fetches all replies.
-- Filters replies that mention `@monitags`.
-- Verifies reply author has verified X account in Monipay Supabase.
-- Sends each valid reply to Gemini for evaluation.
-- If approved, transfers USDC and logs transaction.
+This project is split into two autonomous services for stability and zero-cost write access:
 
-**`pollCommands()`**
-- Searches Twitter for `"@monibot send $X to @user"` or `"@monibot pay @user $X"`.
-- Verifies sender has verified X account.
-- Checks sender's on-chain allowance.
-- Executes `transferFrom` (using sender's pre-approved allowance).
-- Replies with transaction confirmation.
-
-### 3. `gemini.js` (AI Decision Making)
-**`evaluateCampaignReply()`**
-- Sends campaign context to Gemini Flash 3.0.
-- AI evaluates if reply deserves a grant.
-- **Returns:** `{approved: true/false, amount: 0.00-0.50, reasoning: "..."}`
-- Prevents spam/low-effort replies from getting grants.
-- Rewards genuine engagement.
-
-### 4. `blockchain.js` (USDC Transfers on Base)
-**`transferUSDC(toAddress, amount)`**
-- Used for **campaign grants**.
-- Transfers USDC from MoniBot's wallet to recipient.
-- Waits for blockchain confirmation.
-
-**`transferFromUSDC(fromAddress, toAddress, amount, fee)`**
-- Used for **P2P commands**.
-- Transfers USDC using sender's pre-approved allowance.
-- Also transfers 1% fee to MoniBot.
-
-**`getOnchainAllowance(userAddress)`**
-- Checks how much USDC a user has approved for MoniBot to spend.
-- Used to validate P2P commands.
-
-### 5. `database.js` (Supabase Queries)
-- `getProfileByXUsername()`: Finds MoniPay user by their verified X username.
-- `getProfileByMonitag()`: Finds MoniPay user by their `@monitag`.
-- `checkIfAlreadyGranted()`: Prevents duplicate grants in same campaign.
-- `markAsGranted()`: Records that a user received a grant.
-- `logTransaction()`: Saves transaction details to database.
-
-### 6. `package.json`
-- Lists all dependencies (libraries) the bot needs.
-- Railway uses this to install required packages.
-
-### 7. `.env.example`
-- Template showing which environment variables are needed.
-- **Note:** You DON'T use this file directly - it's just documentation. Actual secrets go in Railway's environment variables.
-
-### 8. `.gitignore`
-- Tells Git to NOT commit sensitive files (`.env`, `node_modules`).
-- Prevents accidentally exposing your API keys on GitHub.
+1.  **MoniBot (This Repo: The Worker)**: Reads Twitter, executes all blockchain transfers, and logs every outcome (success/fail) to the Supabase database.
+2.  **MoniBot-VP-Social (Twin Repo: The Social Agent)**: Reads the logs created by the Worker, uses Gemini to write a personality-driven reply, and posts the reply to Twitter via the stable OAuth 2.0 API.
 
 ---
 
-## ⚙️ HOW THE BOT WORKS (Full Flow)
+## 📂 FULL CODE BREAKDOWN (MoniBot Worker)
 
-### 📢 Campaign Flow
-1. **OpenClaw Agent tweets:** "First 5 people to drop their @monitag get $1!"
-   ↓
-2. **Users reply:** "@alice @bob thanks!"
-   ↓
-3. **Bot (every 60s):**
-   - Fetches your campaign tweet
-   - Gets all replies
-   - Extracts @monitags from each reply
-   ↓
-4. **For each @monitag:**
-   - Check: Does @monitag exist in MoniPay?
-   - Check: Has reply author verified their X account?
-   - Check: Already granted in this campaign?
-   ↓
-5. **Send to Gemini AI:**
-   - "Should we give @alice a grant?"
-   - AI returns: `{approved: true, amount: 0.50}`
-   ↓
-6. **Execute transfer:**
-   - Transfer 0.495 USDC to @alice (0.50 - 1% fee)
-   - Keep 0.005 USDC as fee
-   ↓
-7. **Log and reply:**
-   - Save transaction in database
-   - Reply: "✅ Sent $0.495 to @alice! TX: 0xabc..."
+### 1. `index.js` (The Brain / Main Loop)
+- **Function:** Coordinates all services. Runs the core loop every 60 seconds.
+- Loads environment variables (`.env`).
+- Initializes Twitter (read-only), Gemini, and Supabase clients.
+- Runs main loop: Polls for campaign replies and P2P payment commands.
 
-### 💸 P2P Command Flow
-1. **User tweets:** "@monibot send $5 to @jade"
-   ↓
-2. **Bot verifies:**
-   - Does sender have verified X account?
-   - Does sender have $5+ allowance approved?
-   - Does @jade exist on MoniPay?
-   ↓
-3. **Execute transferFrom:**
-   - Transfer $4.95 from sender to @jade
-   - Transfer $0.05 fee to MoniBot
-   ↓
-4. **Reply:** "✅ @user sent $4.95 to @jade! TX: 0x..."
-   - Transfer $0.05 fee to MoniBot
-   ↓
-4. **Reply:** "✅ @user sent $4.95 to @jade! TX: 0x..."
+### 2. `twitter.js` (Twitter Read & Logic)
+- **`pollCampaigns()`**:
+    - Fetches recent campaign announcements (posted by the Social Agent).
+    - Fetches and filters replies mentioning `@monitags` (`@pay_tag`).
+    - Verifies reply author's X account status in Supabase.
+    - Sends each valid reply to `gemini.js` for grant evaluation.
+    - **Worker's Role:** Executes USDC transfer and logs the result.
+- **`pollCommands()`**:
+    - Searches Twitter for P2P commands (e.g., `"@monibot send $X to @user"`).
+    - **Double-Spend Protection:** Checks database (`monibot_transactions`) to ensure the tweet ID hasn't been processed yet.
+    - Verifies sender's X account and on-chain allowance.
+    - Executes `transferFrom` on the Base blockchain.
+- **Goal:** All errors (e.g., `ERROR_BALANCE`, `AI_REJECTED`) are logged to the database instead of being replied to directly.
+
+### 3. `gemini.js` (AI Decision Making)
+- **`evaluateCampaignReply()`**:
+    - Sends campaign/reply context to **Gemini 2.5 Flash**.
+    - **Logic:** AI evaluates if the reply deserves a grant based on engagement quality.
+    - **Output:** `{approved: true/false, amount: 0.00-0.50, reasoning: "..."}`
+    - *Note:* A rejection logs `tx_hash: 'AI_REJECTED'`.
+
+### 4. `blockchain.js` (USDC Transfers on Base)
+- **`transferUSDC(toAddress, amount)`** (For Grants): Transfers USDC from MoniBot's treasury.
+- **`transferFromUSDC(fromAddress, toAddress, amount, fee)`** (For P2P):
+    - Transfers USDC using the sender's pre-approved allowance.
+    - **Safety:** Performs a pre-flight `balanceOf` check to prevent blockchain crashes.
+    - Transfers the fee to the **Official Monipay Fee Wallet** (`0xDC9B...`).
+- **`getOnchainAllowance(userAddress)`**: Checks user's allowance for MoniBot.
+
+### 5. `database.js` (Supabase Queries & Logging)
+- **`logTransaction(...)`**: **The Core Handshake.** Logs all outcomes to the `monibot_transactions` table with:
+    - `tx_hash`: The real hash (Success) OR an error code (`ERROR_BALANCE`, `AI_REJECTED`).
+    - `tweet_id`: The ID of the tweet to be replied to.
+    - `replied`: Set to `FALSE`. (The trigger for the Social Agent).
+- **`checkIfCommandProcessed()`**: Prevents double-spending by checking if a `tweet_id` already exists in logs.
+- `getProfileByMonitag()`: Resolves user handles (`@monitag` is stored as `pay_tag`).
+
+---
+
+## ⚙️ HOW THE TWO-BOT SYSTEM WORKS
+
+### 📢 Campaign Flow (Worker + Social Agent)
+1. **[VP-Social Agent]** **Tweets Campaign:** "First 5 people to drop their @paytag get $1!"
+2. **[User]** Replies: "@alice @bob thanks!"
+3. **[Worker Bot (This Repo)]** Polls Twitter, verifies user, sends to Gemini.
+4. **[Worker Bot]** Executes `transferUSDC` (e.g., $0.99 net).
+5. **[Worker Bot]** Logs to DB: `tx_hash: 0xabc...`, `replied: FALSE`, `tweet_id: REPLY_ID`.
+6. **[VP-Social Agent]** Polls DB, sees `replied: FALSE`.
+7. **[VP-Social Agent]** Uses Gemini to generate reply: *"✅ Sent! Welcome to the onchain economy 🔵 TX: 0xabc...*
+8. **[VP-Social Agent]** Posts reply via OAuth 2.0 API, then flips DB `replied: TRUE`.
+
+### 💸 P2P Command Flow (Worker + Social Agent)
+1. **[User]** Tweets: `"@monibot send $5 to @jade"`
+2. **[Worker Bot]** Verifies allowance, balance, and target existence.
+3. **[Worker Bot]** Executes `transferFromUSDC` (e.g., $4.95 net + $0.05 fee to Monipay Wallet).
+4. **[Worker Bot]** Logs to DB: `tx_hash: 0xxyz...`, `replied: FALSE`, `tweet_id: COMMAND_ID`.
+5. **[VP-Social Agent]** Polls DB, sees `replied: FALSE`.
+6. **[VP-Social Agent]** Posts reply: *"✅ @user sent $4.95 to @jade! TX: 0xxyz..."*
+7. **[VP-Social Agent]** Flips DB `replied: TRUE`.
+
+---
+
+## 🛠️ Deployment Notes
+
+### Repository Recommendation:
+**YES.** Both repositories should be public and linked to demonstrate the decoupled, robust, and modern architecture.
+
+- **Link MoniBot-VP-Social's README** to the MoniBot Worker repository.
+- **Link MoniBot Worker's README** to the MoniBot-VP-Social repository.
+
+### Environment Variables:
+- **Worker (This Repo):** Uses Twitter **Read-Only** keys.
+- **Social Agent (Twin Repo):** Uses Twitter **OAuth 2.0 (Read & Write)** credentials.
