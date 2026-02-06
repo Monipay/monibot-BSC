@@ -6,8 +6,8 @@
 
 This project is split into two autonomous services for stability and zero-cost write access:
 
-1.  **MoniBot (This Repo: The Worker)**: Reads Twitter, executes all blockchain transfers, and logs every outcome (success/fail) to the Supabase database.
-2.  **MoniBot-VP-Social (Twin Repo: The Social Agent)**: Reads the logs created by the Worker, uses Gemini to write a personality-driven reply, and posts the reply to Twitter via the stable OAuth 2.0 API.
+1.  **MoniBot (This Repo)**: **The Worker** - Reads Twitter, executes all blockchain transfers, and logs every outcome (success/fail) to the Supabase database. **[Repo Link](https://github.com/samuelchimmy/monibot)**
+2.  **MoniBot-VP-Social (Twin Repo)**: **The Social Agent** - Reads the logs created by the Worker, uses Gemini to write a personality-driven reply, and posts the reply to Twitter via the stable OAuth 2.0 API. **[Repo Link](https://github.com/samuelchimmy/monibot-vp-social)**
 
 ---
 
@@ -23,7 +23,7 @@ This project is split into two autonomous services for stability and zero-cost w
 - **`pollCampaigns()`**:
     - Fetches recent campaign announcements (posted by the Social Agent).
     - Fetches and filters replies mentioning `@monitags` (`@pay_tag`).
-    - Verifies reply author's X account status in Supabase.
+    - Verifies reply author's X account status in Monipay Supabase.
     - Sends each valid reply to `gemini.js` for grant evaluation.
     - **Worker's Role:** Executes USDC transfer and logs the result.
 - **`pollCommands()`**:
@@ -53,8 +53,8 @@ This project is split into two autonomous services for stability and zero-cost w
     - `tx_hash`: The real hash (Success) OR an error code (`ERROR_BALANCE`, `AI_REJECTED`).
     - `tweet_id`: The ID of the tweet to be replied to.
     - `replied`: Set to `FALSE`. (The trigger for the Social Agent).
-- **`checkIfCommandProcessed()`**: Prevents double-spending by checking if a `tweet_id` already exists in logs.
 - `getProfileByMonitag()`: Resolves user handles (`@monitag` is stored as `pay_tag`).
+- `checkIfCommandProcessed()`: Prevents double-spending by checking if a `tweet_id` already exists in logs.
 
 ---
 
@@ -63,7 +63,7 @@ This project is split into two autonomous services for stability and zero-cost w
 ### 📢 Campaign Flow (Worker + Social Agent)
 1. **[VP-Social Agent]** **Tweets Campaign:** "First 5 people to drop their @paytag get $1!"
 2. **[User]** Replies: "@alice @bob thanks!"
-3. **[Worker Bot (This Repo)]** Polls Twitter, verifies user, sends to Gemini.
+3. **[Worker Bot]** Polls Twitter, verifies user, sends to Gemini.
 4. **[Worker Bot]** Executes `transferUSDC` (e.g., $0.99 net).
 5. **[Worker Bot]** Logs to DB: `tx_hash: 0xabc...`, `replied: FALSE`, `tweet_id: REPLY_ID`.
 6. **[VP-Social Agent]** Polls DB, sees `replied: FALSE`.
@@ -78,17 +78,3 @@ This project is split into two autonomous services for stability and zero-cost w
 5. **[VP-Social Agent]** Polls DB, sees `replied: FALSE`.
 6. **[VP-Social Agent]** Posts reply: *"✅ @user sent $4.95 to @jade! TX: 0xxyz..."*
 7. **[VP-Social Agent]** Flips DB `replied: TRUE`.
-
----
-
-## 🛠️ Deployment Notes
-
-### Repository Recommendation:
-**YES.** Both repositories should be public and linked to demonstrate the decoupled, robust, and modern architecture.
-
-- **Link MoniBot-VP-Social's README** to the MoniBot Worker repository.
-- **Link MoniBot Worker's README** to the MoniBot-VP-Social repository.
-
-### Environment Variables:
-- **Worker (This Repo):** Uses Twitter **Read-Only** keys.
-- **Social Agent (Twin Repo):** Uses Twitter **OAuth 2.0 (Read & Write)** credentials.
