@@ -1,21 +1,33 @@
 {
-  "name": "monibot",
-  "version": "1.0.0",
-  "description": "Autonomous AI marketing agent for MoniPay",
-  "main": "index.js",
+  "name": "monibot-worker",
+  "version": "2.1.0",
+  "description": "MoniBot Silent Worker - Autonomous transaction layer for MoniPay",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "node index.js"
+    "dev": "node --watch index.js"
   },
   "dependencies": {
-    "twitter-api-v2": "^1.17.2",
     "@google/generative-ai": "^0.21.0",
-    "viem": "^2.21.45",
-    "@supabase/supabase-js": "^2.45.4",
-    "dotenv": "^16.4.5"
+    "@supabase/supabase-js": "^2.45.0",
+    "chrono-node": "^2.7.0",
+    "dotenv": "^16.4.5",
+    "twitter-api-v2": "^1.18.2",
+    "viem": "^2.21.0"
   },
   "engines": {
     "node": ">=18.0.0"
-  }
+  },
+  "keywords": [
+    "monibot",
+    "monipay",
+    "twitter-bot",
+    "usdc",
+    "base-chain",
+    "blockchain"
+  ],
+  "author": "MoniPay",
+  "license": "MIT"
 }
+
