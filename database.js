@@ -25,6 +25,17 @@ export function initSupabase() {
   console.log('✅ Supabase initialized (Service Role)');
 }
 
+/**
+ * Get the Supabase client instance
+ * Used by other modules (scheduler, etc.)
+ */
+export function getSupabase() {
+  if (!supabase) {
+    throw new Error('Supabase not initialized. Call initSupabase() first.');
+  }
+  return supabase;
+}
+
 // ============ Profile Lookups ============
 
 /**
