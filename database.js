@@ -202,11 +202,14 @@ export async function logTransaction({
 }) {
   // Determine status based on tx_hash
   // If tx_hash starts with "ERROR_" or is a known error code, mark as failed
+  // LIMIT_REACHED is a special case - it's not an error, just "too late"
   const isError = tx_hash.startsWith('ERROR_') || 
                   tx_hash === 'AI_REJECTED' ||
                   tx_hash === 'ERROR_TARGET_NOT_FOUND';
   
-  const status = isError ? 'failed' : 'completed';
+  const isLimitReached = tx_hash === 'LIMIT_REACHED';
+  
+  const status = isError ? 'failed' : (isLimitReached ? 'limit_reached' : 'completed');
   
   const { error } = await supabase
     .from('monibot_transactions')
@@ -221,14 +224,14 @@ export async function logTransaction({
       tweet_id,            // ID of the tweet to be replied to
       payer_pay_tag,       // PayTag of the sender (for display)
       replied: false,      // Handshake flag for Social Agent
-      status,              // 'completed' or 'failed'
+      status,              // 'completed', 'failed', or 'limit_reached'
       created_at: new Date().toISOString()
     });
 
   if (error) {
     console.error('❌ Database log error:', error.message);
   } else {
-    const emoji = isError ? '⚠️' : '💾';
+    const emoji = isError ? '⚠️' : (isLimitReached ? '⏰' : '💾');
     console.log(`${emoji} Transaction logged: ${type} | ${tx_hash.substring(0, 20)}...`);
   }
 }
@@ -257,7 +260,41 @@ export async function getCampaignByTweetId(tweetId) {
 }
 
 /**
- * Update campaign stats after a grant
+ * Increment campaign participants count after a successful grant
+ * @param {string} tweetId - Campaign tweet ID
+ * @param {number} grantAmount - Amount granted
+ */
+export async function incrementCampaignParticipants(tweetId, grantAmount) {
+  // Fetch current campaign by tweet_id
+  const { data: campaign, error: fetchError } = await supabase
+    .from('campaigns')
+    .select('id, current_participants, budget_spent')
+    .eq('tweet_id', tweetId)
+    .maybeSingle();
+  
+  if (fetchError || !campaign) {
+    console.error(`❌ Error fetching campaign for update:`, fetchError?.message);
+    return;
+  }
+  
+  // Update stats
+  const { error: updateError } = await supabase
+    .from('campaigns')
+    .update({
+      current_participants: (campaign.current_participants || 0) + 1,
+      budget_spent: (campaign.budget_spent || 0) + grantAmount
+    })
+    .eq('id', campaign.id);
+  
+  if (updateError) {
+    console.error(`❌ Error updating campaign stats:`, updateError.message);
+  } else {
+    console.log(`      📊 Campaign updated: ${campaign.current_participants + 1} participants, $${(campaign.budget_spent || 0) + grantAmount} spent`);
+  }
+}
+
+/**
+ * Update campaign stats after a grant (by campaign UUID)
  * @param {string} campaignId - Campaign UUID
  * @param {number} grantAmount - Amount granted
  */
