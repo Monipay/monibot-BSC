@@ -24,6 +24,7 @@ import { initTwitterClient, pollCampaigns, pollCommands } from './twitter.js';
 import { initGemini } from './gemini.js';
 import { initSupabase } from './database.js';
 import { MONIBOT_ROUTER_ADDRESS } from './blockchain.js';
+import { processScheduledJobs } from './scheduler.js';
 
 dotenv.config();
 
@@ -117,6 +118,9 @@ async function mainLoop() {
     if (ENABLE_P2P_COMMANDS) {
       await pollCommands();
     }
+    
+    // Process scheduled jobs (random picks, campaign posts, etc.)
+    await processScheduledJobs();
     
     console.log('─'.repeat(40));
     console.log(`✅ Cycle #${cycleCount} complete. Next in ${POLL_INTERVAL_MS / 1000}s`);
