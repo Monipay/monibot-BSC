@@ -139,14 +139,15 @@ export async function checkIfCommandProcessed(tweetId) {
     .from('monibot_transactions')
     .select('id')
     .eq('tweet_id', tweetId)
-    .maybeSingle();
+    .limit(1);
   
   if (error) {
     console.error(`❌ Error checking command status:`, error.message);
     return false; // Fail open - let on-chain check handle it
   }
   
-  return !!data;
+  // Return true if any row exists for this tweet_id
+  return data && data.length > 0;
 }
 
 // ============ State Updates ============
