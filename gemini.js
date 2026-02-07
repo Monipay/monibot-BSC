@@ -186,3 +186,54 @@ export async function testGeminiConnection() {
     return false;
   }
 }
+
+// ============ Time Expression Parsing ============
+
+/**
+ * Evaluate a natural language time expression using Gemini
+ * Used as fallback when chrono-node can't parse the expression
+ * 
+ * @param {string} text - Text containing time expression
+ * @param {Date} referenceDate - Reference date for relative times
+ * @returns {Promise<{scheduledAt: string, interpreted: string, confidence: string}>}
+ */
+export async function evaluateTimeExpression(text, referenceDate = new Date()) {
+  const prompt = `You are a time parser. Extract the scheduled time from the following text.
+
+TEXT: "${text}"
+CURRENT DATE/TIME: ${referenceDate.toISOString()}
+
+Examples:
+- "in 5 hours" → 5 hours from now
+- "tomorrow at 3pm" → next day at 15:00
+- "tonight" → today at 20:00
+- "in 30 minutes" → 30 minutes from now
+
+Respond with ONLY valid JSON (no markdown):
+{"scheduledAt": "ISO-8601 datetime string", "interpreted": "human readable interpretation", "confidence": "high|medium|low"}
+
+If you cannot parse a time, respond with:
+{"scheduledAt": null, "interpreted": "could not parse", "confidence": "none"}`;
+
+  try {
+    const result = await geminiModel.generateContent(prompt);
+    const response = await result.response;
+    const text = response.text();
+    
+    // Clean and parse response
+    let cleanText = text
+      .replace(/```json\n?/gi, '')
+      .replace(/```\n?/g, '')
+      .trim();
+    
+    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]);
+    }
+    
+    return { scheduledAt: null, interpreted: 'parse failed', confidence: 'none' };
+  } catch (error) {
+    console.error('❌ Gemini time parsing error:', error.message);
+    return { scheduledAt: null, interpreted: error.message, confidence: 'none' };
+  }
+}
