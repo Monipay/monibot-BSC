@@ -23,14 +23,14 @@ export function initGemini() {
   
   // Using Gemini 2.0 Flash for fast, cost-effective evaluation
   geminiModel = genAI.getGenerativeModel({ 
-    model: 'gemini-2.0-flash-exp',
+    model: 'gemini-1.5-flash',
     generationConfig: {
       temperature: 0.3, // Lower temperature for more consistent decisions
       maxOutputTokens: 256,
     }
   });
   
-  console.log('✅ Gemini AI initialized (gemini-2.0-flash-exp)');
+  console.log('✅ Gemini AI initialized (gemini-1.5-flash)');
 }
 
 // ============ Campaign Evaluation ============
