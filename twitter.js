@@ -2,23 +2,30 @@
  * MoniBot Worker - Twitter Module (Silent Worker Mode)
  * 
  * This module polls Twitter for:
- * 1. Campaign Replies - Process grants for qualifying replies
+ * 1. Campaign Replies - Process grants for qualifying replies (FIRST COME FIRST SERVE)
  * 2. P2P Commands - Process "send $X to @user" commands
  * 
  * IMPORTANT: This is a "Silent Worker" - it does NOT reply via Twitter API.
  * All results (success/failure) are logged to monibot_transactions table.
  * A separate Social Agent reads this table and handles replies.
+ * 
+ * GRANT LOGIC (v2.1 - Simplified):
+ * - No AI spam checking - every valid @paytag gets a grant
+ * - First come, first serve until max_participants reached
+ * - Grant amount comes from the campaign record
+ * - When limit reached, log as LIMIT_REACHED for funny "too late" reply
  */
 
 import { TwitterApi } from 'twitter-api-v2';
-import { evaluateCampaignReply } from './gemini.js';
 import { 
   getProfileByXUsername, 
   getProfileByMonitag, 
   checkIfAlreadyGranted,
   checkIfCommandProcessed,
   markAsGranted,
-  logTransaction 
+  logTransaction,
+  getCampaignByTweetId,
+  incrementCampaignParticipants
 } from './database.js';
 import { 
   executeP2PViaRouter, 
@@ -165,7 +172,7 @@ async function processGrantForPayTag(payTag, reply, author, campaignTweet, autho
   try {
     console.log(`   💎 Checking tag @${payTag}...`);
     
-    // 1. Resolve target profile
+    // 1. Resolve target profile (the @paytag mentioned)
     const targetProfile = await getProfileByMonitag(payTag);
     if (!targetProfile) {
       console.log(`      ⏭️ Tag @${payTag} not found in database.`);
@@ -182,39 +189,29 @@ async function processGrantForPayTag(payTag, reply, author, campaignTweet, autho
       return;
     }
 
-    // 2. Check if already granted (DB check for fast path)
-    const alreadyGrantedDB = await checkIfAlreadyGranted(campaignTweet.id, targetProfile.id);
-    if (alreadyGrantedDB) {
-      console.log(`      ⏭️ Grant already issued to ${payTag} for this campaign (DB).`);
+    // 2. Get campaign details (for grant_amount and max_participants)
+    const campaign = await getCampaignByTweetId(campaignTweet.id);
+    if (!campaign) {
+      console.log(`      ⏭️ Campaign not found for tweet ${campaignTweet.id}`);
       return;
     }
 
-    // 3. Check if already granted on-chain (contract check for safety)
-    const alreadyGrantedOnChain = await isGrantAlreadyIssued(campaignTweet.id, targetProfile.wallet_address);
-    if (alreadyGrantedOnChain) {
-      console.log(`      ⏭️ Grant already issued on-chain, syncing DB...`);
-      await markAsGranted(campaignTweet.id, targetProfile.id);
-      return;
-    }
+    const grantAmount = campaign.grant_amount;
+    const maxParticipants = campaign.max_participants || 999999;
+    const currentParticipants = campaign.current_participants || 0;
 
-    // 4. AI Evaluation
-    console.log(`      🤖 Evaluating with Gemini...`);
-    const evaluation = await evaluateCampaignReply({
-      campaignTweet: campaignTweet.text,
-      reply: reply.text,
-      replyAuthor: author.username,
-      targetPayTag: payTag,
-      isNewUser: new Date(targetProfile.created_at) > new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-    });
+    console.log(`      📊 Campaign: $${grantAmount}/grant, ${currentParticipants}/${maxParticipants} participants`);
 
-    if (!evaluation.approved) {
-      console.log(`      ❌ Rejected: ${evaluation.reasoning}`);
+    // 3. Check if limit already reached (FIRST COME FIRST SERVE)
+    if (currentParticipants >= maxParticipants) {
+      console.log(`      ⏰ Limit reached! Too late for @${payTag}`);
       await logTransaction({
         sender_id: process.env.MONIBOT_PROFILE_ID,
         receiver_id: targetProfile.id,
         amount: 0, 
         fee: 0, 
-        tx_hash: 'AI_REJECTED',
+        tx_hash: 'LIMIT_REACHED',
+        campaign_id: campaignTweet.id,
         type: 'grant', 
         tweet_id: reply.id, 
         payer_pay_tag: 'MoniBot'
@@ -222,13 +219,29 @@ async function processGrantForPayTag(payTag, reply, author, campaignTweet, autho
       return;
     }
 
-    const grantAmount = evaluation.amount;
+    // 4. Check if already granted (DB check for fast path)
+    const alreadyGrantedDB = await checkIfAlreadyGranted(campaignTweet.id, targetProfile.id);
+    if (alreadyGrantedDB) {
+      console.log(`      ⏭️ Grant already issued to ${payTag} for this campaign (DB).`);
+      return;
+    }
+
+    // 5. Check if already granted on-chain (contract check for safety)
+    const alreadyGrantedOnChain = await isGrantAlreadyIssued(campaignTweet.id, targetProfile.wallet_address);
+    if (alreadyGrantedOnChain) {
+      console.log(`      ⏭️ Grant already issued on-chain, syncing DB...`);
+      await markAsGranted(campaignTweet.id, targetProfile.id);
+      return;
+    }
+
+    // 6. NO AI CHECK - Direct grant (First come, first serve!)
+    console.log(`      ✅ Valid @paytag found! Granting $${grantAmount} to @${payTag}`);
     
-    // 5. Calculate fee (contract will enforce this)
+    // 7. Calculate fee (contract will enforce this)
     const { fee, netAmount } = await calculateFee(grantAmount);
     console.log(`      💰 Grant: $${grantAmount} (Net: $${netAmount}, Fee: $${fee})`);
 
-    // 6. Execute grant via Router contract
+    // 8. Execute grant via Router contract
     console.log(`      💸 Executing grant via Router...`);
     
     try {
@@ -252,6 +265,8 @@ async function processGrantForPayTag(payTag, reply, author, campaignTweet, autho
       });
       
       await markAsGranted(campaignTweet.id, targetProfile.id);
+      await incrementCampaignParticipants(campaignTweet.id, grantAmount);
+      
       console.log(`      ✅ Grant Success! TX: ${hash}`);
       
     } catch (txError) {
@@ -474,4 +489,3 @@ async function processP2PCommand(tweet, author) {
     console.error('❌ Error in processP2PCommand:', error.message);
   }
 }
-
