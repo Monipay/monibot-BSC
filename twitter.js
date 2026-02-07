@@ -77,8 +77,11 @@ export async function pollCampaigns() {
   try {
     console.log('📊 Polling for campaign replies...');
     
+    const botUserId = process.env.TWITTER_BOT_USER_ID || await getBotUserId();
+    console.log(`   Bot User ID: ${botUserId}`);
+    
     const myTweets = await twitterClient.v2.userTimeline(
-      process.env.TWITTER_BOT_USER_ID || await getBotUserId(),
+      botUserId,
       {
         max_results: 10,
         'tweet.fields': ['created_at', 'conversation_id', 'text'],
@@ -86,16 +89,22 @@ export async function pollCampaigns() {
       }
     );
     
+    console.log(`   Timeline response: ${JSON.stringify(myTweets.data?.meta || {})}`);
+    
     if (!myTweets.data?.data) {
-      console.log('   No recent tweets found.');
+      console.log('   No recent tweets found from bot account.');
       return;
     }
     
+    console.log(`   Found ${myTweets.data.data.length} bot tweets to check for replies.`);
+    
     for (const tweet of myTweets.data.data) {
+      console.log(`   Checking tweet: ${tweet.id} - "${tweet.text.substring(0, 50)}..."`);
       await processCampaignTweet(tweet);
     }
   } catch (error) {
     console.error('❌ Error polling campaigns:', error.message);
+    console.error('   Full error:', error);
   }
 }
 
@@ -465,3 +474,4 @@ async function processP2PCommand(tweet, author) {
     console.error('❌ Error in processP2PCommand:', error.message);
   }
 }
+
