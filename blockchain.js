@@ -20,18 +20,55 @@ import { privateKeyToAccount } from 'viem/accounts';
 const MONIBOT_ROUTER_ADDRESS = '0xBEE37c2f3Ce9a48D498FC0D47629a1E10356A516';
 const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 
-// ============ Clients ============
+// ============ Clients (RPC failover + retry) ============
 
-const publicClient = createPublicClient({
+const RPC_URLS = [
+  process.env.BASE_RPC_URL,
+  'https://base-rpc.publicnode.com',
+  'https://base.drpc.org',
+  'https://mainnet.base.org',
+].filter(Boolean);
+
+let rpcIndex = 0;
+
+function currentRpc() {
+  return RPC_URLS[Math.min(rpcIndex, RPC_URLS.length - 1)];
+}
+
+function rotateRpc() {
+  if (rpcIndex < RPC_URLS.length - 1) {
+    rpcIndex += 1;
+    console.log(`  🔁 RPC failover → ${currentRpc()}`);
+  }
+}
+
+function isRateLimitError(err) {
+  const msg = String(err?.message || err);
+  return msg.includes('429') || msg.toLowerCase().includes('rate limit') || msg.toLowerCase().includes('over rate limit');
+}
+
+let publicClient = createPublicClient({
   chain: base,
-  transport: http(process.env.BASE_RPC_URL)
+  transport: http(currentRpc(), { retryCount: 3, retryDelay: 300 })
 });
 
-const walletClient = createWalletClient({
+let walletClient = createWalletClient({
   account: privateKeyToAccount(process.env.MONIBOT_PRIVATE_KEY),
   chain: base,
-  transport: http(process.env.BASE_RPC_URL)
+  transport: http(currentRpc(), { retryCount: 3, retryDelay: 300 })
 });
+
+function rebuildClients() {
+  publicClient = createPublicClient({
+    chain: base,
+    transport: http(currentRpc(), { retryCount: 3, retryDelay: 300 })
+  });
+  walletClient = createWalletClient({
+    account: privateKeyToAccount(process.env.MONIBOT_PRIVATE_KEY),
+    chain: base,
+    transport: http(currentRpc(), { retryCount: 3, retryDelay: 300 })
+  });
+}
 
 // ============ MoniBotRouter ABI (Partial) ============
 
@@ -118,7 +155,9 @@ export async function executeP2PViaRouter(fromAddress, toAddress, amount, tweetI
   const amountInUnits = parseUnits(amount.toFixed(6), 6);
   
   // --- 1. PRE-FLIGHT CHECKS ---
-  const [nonce, balance, allowance, isTweetUsed] = await Promise.all([
+  let nonce, balance, allowance, isTweetUsed;
+
+  const runPreflight = () => Promise.all([
     publicClient.readContract({
       address: MONIBOT_ROUTER_ADDRESS,
       abi: moniBotRouterAbi,
@@ -144,6 +183,19 @@ export async function executeP2PViaRouter(fromAddress, toAddress, amount, tweetI
       args: [tweetId]
     })
   ]);
+
+  try {
+    [nonce, balance, allowance, isTweetUsed] = await runPreflight();
+  } catch (err) {
+    if (isRateLimitError(err)) {
+      console.warn('  ⚠️ RPC rate limited during preflight; retrying on fallback RPC...');
+      rotateRpc();
+      rebuildClients();
+      ;[nonce, balance, allowance, isTweetUsed] = await runPreflight();
+    } else {
+      throw err;
+    }
+  }
 
   console.log(`  🔍 Pre-flight Check for ${fromAddress}:`);
   console.log(`     Nonce: ${nonce}`);
@@ -178,12 +230,40 @@ export async function executeP2PViaRouter(fromAddress, toAddress, amount, tweetI
 
   // --- 3. EXECUTE VIA ROUTER ---
   console.log(`     🚀 Executing P2P via Router...`);
-  
+
+  // Some RPC providers enforce a very low default gas "allowance" during estimation.
+  // We explicitly estimate gas and provide a buffered limit to avoid
+  // "gas required exceeds allowance" errors.
+  const estimate = async () => publicClient.estimateContractGas({
+    address: MONIBOT_ROUTER_ADDRESS,
+    abi: moniBotRouterAbi,
+    functionName: 'executeP2P',
+    args: [fromAddress, toAddress, amountInUnits, nonce, tweetId],
+    account: walletClient.account?.address,
+  });
+
+  let gas;
+  try {
+    gas = await estimate();
+  } catch (err) {
+    if (isRateLimitError(err)) {
+      console.warn('  ⚠️ RPC rate limited during gas estimate; retrying on fallback RPC...');
+      rotateRpc();
+      rebuildClients();
+      gas = await estimate();
+    } else {
+      throw err;
+    }
+  }
+
+  const gasLimit = gas + gas / 5n; // +20% buffer
+
   const hash = await walletClient.writeContract({
     address: MONIBOT_ROUTER_ADDRESS,
     abi: moniBotRouterAbi,
     functionName: 'executeP2P',
-    args: [fromAddress, toAddress, amountInUnits, nonce, tweetId]
+    args: [fromAddress, toAddress, amountInUnits, nonce, tweetId],
+    gas: gasLimit,
   });
 
   await publicClient.waitForTransactionReceipt({ hash });
@@ -210,7 +290,9 @@ export async function executeGrantViaRouter(toAddress, amount, campaignId) {
   const amountInUnits = parseUnits(amount.toFixed(6), 6);
 
   // --- 1. PRE-FLIGHT CHECKS ---
-  const [isGrantIssued, contractBalance] = await Promise.all([
+  let isGrantIssued, contractBalance;
+
+  const runGrantPreflight = () => Promise.all([
     publicClient.readContract({
       address: MONIBOT_ROUTER_ADDRESS,
       abi: moniBotRouterAbi,
@@ -224,6 +306,19 @@ export async function executeGrantViaRouter(toAddress, amount, campaignId) {
       args: [MONIBOT_ROUTER_ADDRESS]
     })
   ]);
+
+  try {
+    [isGrantIssued, contractBalance] = await runGrantPreflight();
+  } catch (err) {
+    if (isRateLimitError(err)) {
+      console.warn('  ⚠️ RPC rate limited during grant preflight; retrying on fallback RPC...');
+      rotateRpc();
+      rebuildClients();
+      ;[isGrantIssued, contractBalance] = await runGrantPreflight();
+    } else {
+      throw err;
+    }
+  }
 
   console.log(`  🔍 Pre-flight Check for Grant:`);
   console.log(`     Recipient: ${toAddress}`);
@@ -253,11 +348,36 @@ export async function executeGrantViaRouter(toAddress, amount, campaignId) {
   // --- 3. EXECUTE VIA ROUTER ---
   console.log(`     🚀 Executing Grant via Router...`);
 
+  const estimate = async () => publicClient.estimateContractGas({
+    address: MONIBOT_ROUTER_ADDRESS,
+    abi: moniBotRouterAbi,
+    functionName: 'executeGrant',
+    args: [toAddress, amountInUnits, campaignId],
+    account: walletClient.account?.address,
+  });
+
+  let gas;
+  try {
+    gas = await estimate();
+  } catch (err) {
+    if (isRateLimitError(err)) {
+      console.warn('  ⚠️ RPC rate limited during gas estimate; retrying on fallback RPC...');
+      rotateRpc();
+      rebuildClients();
+      gas = await estimate();
+    } else {
+      throw err;
+    }
+  }
+
+  const gasLimit = gas + gas / 5n; // +20% buffer
+
   const hash = await walletClient.writeContract({
     address: MONIBOT_ROUTER_ADDRESS,
     abi: moniBotRouterAbi,
     functionName: 'executeGrant',
-    args: [toAddress, amountInUnits, campaignId]
+    args: [toAddress, amountInUnits, campaignId],
+    gas: gasLimit,
   });
 
   await publicClient.waitForTransactionReceipt({ hash });
