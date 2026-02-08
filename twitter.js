@@ -9,11 +9,14 @@
  * All results (success/failure) are logged to monibot_transactions table.
  * A separate Social Agent reads this table and handles replies.
  * 
- * GRANT LOGIC (v2.1 - Simplified):
+ * GRANT LOGIC (v3.0 - Database-Driven):
+ * - Fetches active campaigns from DB
+ * - Searches for replies using conversation_id
  * - No AI spam checking - every valid @paytag gets a grant
  * - First come, first serve until max_participants reached
  * - Grant amount comes from the campaign record
- * - When limit reached, log as LIMIT_REACHED for funny "too late" reply
+ * - One grant per reply (first mentioned paytag only)
+ * - Syncs successful transactions to main ledger
  */
 
 import { TwitterApi } from 'twitter-api-v2';
@@ -25,7 +28,9 @@ import {
   markAsGranted,
   logTransaction,
   getCampaignByTweetId,
-  incrementCampaignParticipants
+  incrementCampaignParticipants,
+  getActiveCampaigns,
+  syncToMainLedger
 } from './database.js';
 import { 
   executeP2PViaRouter, 
@@ -34,11 +39,15 @@ import {
   getUSDCBalance,
   isTweetProcessed,
   isGrantAlreadyIssued,
-  calculateFee
+  calculateFee,
+  MONIBOT_ROUTER_ADDRESS
 } from './blockchain.js';
 
 let twitterClient;
 let lastProcessedTweetId = null;
+
+// MoniBot's wallet address for ledger syncing
+const MONIBOT_WALLET_ADDRESS = process.env.MONIBOT_WALLET_ADDRESS || '0x...'; // Set in env
 
 // ============ Initialization ============
 
@@ -57,12 +66,26 @@ export function initTwitterClient() {
 
 /**
  * Extracts @mentions from tweet text, excluding the bot itself.
+ * Returns ONLY the first valid paytag (one grant per reply).
+ */
+function extractFirstPayTag(text) {
+  const matches = text.match(/@([a-zA-Z0-9_-]+)/g) || [];
+  const filtered = matches
+    .map(m => m.slice(1).toLowerCase())
+    .filter(m => m !== 'monibot' && m !== 'monipay');
+  
+  return filtered.length > 0 ? filtered[0] : null;
+}
+
+/**
+ * Extracts all @mentions from tweet text, excluding the bot.
+ * Used for P2P commands where we need the target.
  */
 function extractPayTags(text) {
   const matches = text.match(/@([a-zA-Z0-9_-]+)/g) || [];
   return matches
     .map(m => m.slice(1).toLowerCase())
-    .filter(m => m !== 'monibot'); 
+    .filter(m => m !== 'monibot' && m !== 'monipay'); 
 }
 
 async function getBotUserId() {
@@ -74,40 +97,42 @@ async function getBotUserId() {
   }
 }
 
-// ============ Loop 1: Campaign Replies ============
+// ============ Loop 1: Campaign Replies (DB-Driven) ============
 
 /**
- * Fetches recent bot tweets and processes replies for grants.
+ * Fetches active campaigns from DB and searches for replies.
+ * This is more reliable than polling bot's timeline.
  * Grants are funded from the MoniBotRouter contract balance.
  */
 export async function pollCampaigns() {
   try {
     console.log('📊 Polling for campaign replies...');
     
-    const botUserId = process.env.TWITTER_BOT_USER_ID || await getBotUserId();
-    console.log(`   Bot User ID: ${botUserId}`);
+    // 1. Get active campaigns from database
+    const activeCampaigns = await getActiveCampaigns();
     
-    const myTweets = await twitterClient.v2.userTimeline(
-      botUserId,
-      {
-        max_results: 10,
-        'tweet.fields': ['created_at', 'conversation_id', 'text'],
-        start_time: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-      }
-    );
-    
-    console.log(`   Timeline response: ${JSON.stringify(myTweets.data?.meta || {})}`);
-    
-    if (!myTweets.data?.data) {
-      console.log('   No recent tweets found from bot account.');
+    if (!activeCampaigns || activeCampaigns.length === 0) {
+      console.log('   No active campaigns found.');
       return;
     }
     
-    console.log(`   Found ${myTweets.data.data.length} bot tweets to check for replies.`);
+    console.log(`   Found ${activeCampaigns.length} active campaign(s)`);
     
-    for (const tweet of myTweets.data.data) {
-      console.log(`   Checking tweet: ${tweet.id} - "${tweet.text.substring(0, 50)}..."`);
-      await processCampaignTweet(tweet);
+    // 2. Process each campaign
+    for (const campaign of activeCampaigns) {
+      // Skip if campaign is already at max participants
+      if (campaign.current_participants >= (campaign.max_participants || 999999)) {
+        console.log(`   ⏭️ Campaign ${campaign.id.substring(0, 8)} already at max participants`);
+        continue;
+      }
+      
+      // Skip if no tweet_id (campaign not yet posted)
+      if (!campaign.tweet_id) {
+        console.log(`   ⏭️ Campaign ${campaign.id.substring(0, 8)} has no tweet_id`);
+        continue;
+      }
+      
+      await processCampaignReplies(campaign);
     }
   } catch (error) {
     console.error('❌ Error polling campaigns:', error.message);
@@ -115,62 +140,75 @@ export async function pollCampaigns() {
   }
 }
 
-async function processCampaignTweet(campaignTweet) {
+/**
+ * Search for replies to a specific campaign tweet and process them
+ */
+async function processCampaignReplies(campaign) {
   try {
+    console.log(`\n🔍 Checking campaign: ${campaign.tweet_id}`);
+    console.log(`   Grant: $${campaign.grant_amount} | ${campaign.current_participants || 0}/${campaign.max_participants || '∞'} participants`);
+    
+    // Search for replies using conversation_id
     const replies = await twitterClient.v2.search({
-      query: `conversation_id:${campaignTweet.id}`,
+      query: `conversation_id:${campaign.tweet_id} -from:monibot`,
       max_results: 100,
       'tweet.fields': ['author_id', 'created_at'],
       'user.fields': ['username'],
       expansions: ['author_id']
     });
     
-    if (!replies.data?.data) return;
+    if (!replies.data?.data) {
+      console.log('   No replies found.');
+      return;
+    }
     
-    console.log(`🔎 Found ${replies.data.data.length} replies to campaign ${campaignTweet.id}`);
+    console.log(`   Found ${replies.data.data.length} replies to process`);
     
+    // Process each reply
     for (const reply of replies.data.data) {
       const author = replies.includes?.users?.find(u => u.id === reply.author_id);
       if (!author) continue;
       
-      await processReply(reply, author, campaignTweet);
+      await processReply(reply, author, campaign);
     }
   } catch (error) {
-    console.error(`❌ Error processing replies for ${campaignTweet.id}:`, error.message);
+    console.error(`❌ Error processing campaign ${campaign.tweet_id}:`, error.message);
   }
 }
 
-async function processReply(reply, author, campaignTweet) {
+/**
+ * Process a single reply to a campaign tweet
+ */
+async function processReply(reply, author, campaign) {
   try {
     // 1. Double-Spend Protection: Has this reply already been handled in DB?
     const alreadyHandled = await checkIfCommandProcessed(reply.id);
     if (alreadyHandled) return;
 
-    console.log(`\n📝 Processing reply from @${author.username}`);
+    console.log(`\n📝 Processing reply from @${author.username}: "${reply.text.substring(0, 50)}..."`);
     
-    const payTags = extractPayTags(reply.text);
-    if (payTags.length === 0) {
-      console.log('   ⏭️ No pay tags found, skipping.');
+    // 2. Extract FIRST valid paytag only (one grant per reply)
+    const targetPayTag = extractFirstPayTag(reply.text);
+    if (!targetPayTag) {
+      console.log('   ⏭️ No valid pay tags found, skipping.');
       return;
     }
     
-    const authorProfile = await getProfileByXUsername(author.username);
-    if (!authorProfile || !authorProfile.x_verified) {
-      console.log(`   ⏭️ @${author.username} not verified in MoniPay, skipping.`);
-      return;
-    }
+    console.log(`   🎯 Target PayTag: @${targetPayTag}`);
     
-    for (const tag of payTags) {
-      await processGrantForPayTag(tag, reply, author, campaignTweet, authorProfile);
-    }
+    // 3. Process the grant for this paytag
+    await processGrantForPayTag(targetPayTag, reply, author, campaign);
   } catch (error) {
     console.error('❌ Error in processReply:', error.message);
   }
 }
 
-async function processGrantForPayTag(payTag, reply, author, campaignTweet, authorProfile) {
+/**
+ * Process a grant for a specific paytag from a campaign reply
+ */
+async function processGrantForPayTag(payTag, reply, author, campaign) {
   try {
-    console.log(`   💎 Checking tag @${payTag}...`);
+    console.log(`   💎 Processing grant for @${payTag}...`);
     
     // 1. Resolve target profile (the @paytag mentioned)
     const targetProfile = await getProfileByMonitag(payTag);
@@ -178,29 +216,28 @@ async function processGrantForPayTag(payTag, reply, author, campaignTweet, autho
       console.log(`      ⏭️ Tag @${payTag} not found in database.`);
       await logTransaction({
         sender_id: process.env.MONIBOT_PROFILE_ID,
-        receiver_id: authorProfile.id, 
+        receiver_id: process.env.MONIBOT_PROFILE_ID, // Fallback to self since no target
         amount: 0, 
         fee: 0, 
         tx_hash: 'ERROR_TARGET_NOT_FOUND',
         type: 'grant', 
         tweet_id: reply.id, 
-        payer_pay_tag: 'MoniBot'
+        payer_pay_tag: 'MoniBot',
+        recipient_pay_tag: payTag // Log the attempted target
       });
       return;
     }
 
-    // 2. Get campaign details (for grant_amount and max_participants)
-    const campaign = await getCampaignByTweetId(campaignTweet.id);
-    if (!campaign) {
-      console.log(`      ⏭️ Campaign not found for tweet ${campaignTweet.id}`);
+    // 2. Get current campaign stats (re-fetch for latest count)
+    const currentCampaign = await getCampaignByTweetId(campaign.tweet_id);
+    if (!currentCampaign) {
+      console.log(`      ⏭️ Campaign not found or no longer active`);
       return;
     }
 
-    const grantAmount = campaign.grant_amount;
-    const maxParticipants = campaign.max_participants || 999999;
-    const currentParticipants = campaign.current_participants || 0;
-
-    console.log(`      📊 Campaign: $${grantAmount}/grant, ${currentParticipants}/${maxParticipants} participants`);
+    const grantAmount = currentCampaign.grant_amount;
+    const maxParticipants = currentCampaign.max_participants || 999999;
+    const currentParticipants = currentCampaign.current_participants || 0;
 
     // 3. Check if limit already reached (FIRST COME FIRST SERVE)
     if (currentParticipants >= maxParticipants) {
@@ -211,61 +248,80 @@ async function processGrantForPayTag(payTag, reply, author, campaignTweet, autho
         amount: 0, 
         fee: 0, 
         tx_hash: 'LIMIT_REACHED',
-        campaign_id: campaignTweet.id,
+        campaign_id: campaign.tweet_id,
         type: 'grant', 
         tweet_id: reply.id, 
-        payer_pay_tag: 'MoniBot'
+        payer_pay_tag: 'MoniBot',
+        recipient_pay_tag: targetProfile.pay_tag
       });
       return;
     }
 
     // 4. Check if already granted (DB check for fast path)
-    const alreadyGrantedDB = await checkIfAlreadyGranted(campaignTweet.id, targetProfile.id);
+    const alreadyGrantedDB = await checkIfAlreadyGranted(campaign.tweet_id, targetProfile.id);
     if (alreadyGrantedDB) {
       console.log(`      ⏭️ Grant already issued to ${payTag} for this campaign (DB).`);
       return;
     }
 
     // 5. Check if already granted on-chain (contract check for safety)
-    const alreadyGrantedOnChain = await isGrantAlreadyIssued(campaignTweet.id, targetProfile.wallet_address);
+    const alreadyGrantedOnChain = await isGrantAlreadyIssued(campaign.tweet_id, targetProfile.wallet_address);
     if (alreadyGrantedOnChain) {
       console.log(`      ⏭️ Grant already issued on-chain, syncing DB...`);
-      await markAsGranted(campaignTweet.id, targetProfile.id);
+      await markAsGranted(campaign.tweet_id, targetProfile.id);
       return;
     }
 
-    // 6. NO AI CHECK - Direct grant (First come, first serve!)
-    console.log(`      ✅ Valid @paytag found! Granting $${grantAmount} to @${payTag}`);
-    
-    // 7. Calculate fee (contract will enforce this)
+    // 6. Calculate fee (contract will enforce this)
     const { fee, netAmount } = await calculateFee(grantAmount);
     console.log(`      💰 Grant: $${grantAmount} (Net: $${netAmount}, Fee: $${fee})`);
 
-    // 8. Execute grant via Router contract
+    // 7. Execute grant via Router contract
     console.log(`      💸 Executing grant via Router...`);
     
     try {
       const { hash, fee: actualFee } = await executeGrantViaRouter(
         targetProfile.wallet_address,
         grantAmount,
-        campaignTweet.id // campaignId for on-chain deduplication
+        campaign.tweet_id // campaignId for on-chain deduplication
       );
       
-      // Log success to DB
+      const netAmountReceived = grantAmount - actualFee;
+      
+      // 8. Log success to monibot_transactions
       await logTransaction({
         sender_id: process.env.MONIBOT_PROFILE_ID,
         receiver_id: targetProfile.id,
-        amount: grantAmount - actualFee, // Net amount received
+        amount: netAmountReceived,
         fee: actualFee,
         tx_hash: hash,
-        campaign_id: campaignTweet.id,
+        campaign_id: campaign.tweet_id,
         type: 'grant',
         tweet_id: reply.id,
-        payer_pay_tag: 'MoniBot'
+        payer_pay_tag: 'MoniBot',
+        recipient_pay_tag: targetProfile.pay_tag
       });
       
-      await markAsGranted(campaignTweet.id, targetProfile.id);
-      await incrementCampaignParticipants(campaignTweet.id, grantAmount);
+      // 9. Mark as granted in campaign_grants
+      await markAsGranted(campaign.tweet_id, targetProfile.id);
+      
+      // 10. Increment campaign participants
+      await incrementCampaignParticipants(campaign.tweet_id, grantAmount);
+      
+      // 11. Sync to main transactions ledger (for user receipts)
+      await syncToMainLedger({
+        senderWalletAddress: MONIBOT_WALLET_ADDRESS,
+        receiverWalletAddress: targetProfile.wallet_address,
+        senderPayTag: 'MoniBot',
+        receiverPayTag: targetProfile.pay_tag,
+        amount: netAmountReceived,
+        fee: actualFee,
+        txHash: hash,
+        monibotType: 'grant',
+        tweetId: reply.id,
+        campaignId: campaign.tweet_id,
+        campaignName: campaign.message?.substring(0, 50) || 'MoniBot Campaign'
+      });
       
       console.log(`      ✅ Grant Success! TX: ${hash}`);
       
@@ -276,7 +332,7 @@ async function processGrantForPayTag(payTag, reply, author, campaignTweet, autho
       let errorCode = 'ERROR_BLOCKCHAIN';
       if (txError.message.includes('ERROR_DUPLICATE_GRANT')) {
         errorCode = 'ERROR_DUPLICATE_GRANT';
-      } else if (txError.message.includes('ERROR_CONTRACT_BALANCE')) {
+      } else if (txError.message.includes('ERROR_CONTRACT_BALANCE') || txError.message.includes('insufficient')) {
         errorCode = 'ERROR_TREASURY_EMPTY';
       }
       
@@ -288,7 +344,8 @@ async function processGrantForPayTag(payTag, reply, author, campaignTweet, autho
         tx_hash: errorCode,
         type: 'grant', 
         tweet_id: reply.id, 
-        payer_pay_tag: 'MoniBot'
+        payer_pay_tag: 'MoniBot',
+        recipient_pay_tag: targetProfile.pay_tag
       });
     }
   } catch (error) {
@@ -397,7 +454,8 @@ async function processP2PCommand(tweet, author) {
         tx_hash: 'ERROR_ALLOWANCE',
         type: 'p2p_command', 
         tweet_id: tweet.id, 
-        payer_pay_tag: senderProfile.pay_tag
+        payer_pay_tag: senderProfile.pay_tag,
+        recipient_pay_tag: targetPayTag
       });
       return;
     }
@@ -414,7 +472,8 @@ async function processP2PCommand(tweet, author) {
         tx_hash: 'ERROR_BALANCE',
         type: 'p2p_command', 
         tweet_id: tweet.id, 
-        payer_pay_tag: senderProfile.pay_tag
+        payer_pay_tag: senderProfile.pay_tag,
+        recipient_pay_tag: targetPayTag
       });
       return;
     }
@@ -431,7 +490,8 @@ async function processP2PCommand(tweet, author) {
         tx_hash: 'ERROR_TARGET_NOT_FOUND',
         type: 'p2p_command', 
         tweet_id: tweet.id, 
-        payer_pay_tag: senderProfile.pay_tag
+        payer_pay_tag: senderProfile.pay_tag,
+        recipient_pay_tag: targetPayTag
       });
       return;
     }
@@ -447,16 +507,32 @@ async function processP2PCommand(tweet, author) {
         tweet.id // tweetId for on-chain deduplication
       );
 
-      // Log success to DB
+      const netAmountReceived = amount - actualFee;
+
+      // 10. Log success to monibot_transactions
       await logTransaction({
         sender_id: senderProfile.id,
         receiver_id: receiverProfile.id,
-        amount: amount - actualFee, // Net amount received
+        amount: netAmountReceived,
         fee: actualFee,
         tx_hash: hash,
         type: 'p2p_command',
         tweet_id: tweet.id,
-        payer_pay_tag: senderProfile.pay_tag
+        payer_pay_tag: senderProfile.pay_tag,
+        recipient_pay_tag: receiverProfile.pay_tag
+      });
+      
+      // 11. Sync to main transactions ledger (for user receipts)
+      await syncToMainLedger({
+        senderWalletAddress: senderProfile.wallet_address,
+        receiverWalletAddress: receiverProfile.wallet_address,
+        senderPayTag: senderProfile.pay_tag,
+        receiverPayTag: receiverProfile.pay_tag,
+        amount: netAmountReceived,
+        fee: actualFee,
+        txHash: hash,
+        monibotType: 'p2p',
+        tweetId: tweet.id
       });
       
       console.log(`   ✅ P2P Success! TX: ${hash}`);
@@ -482,7 +558,8 @@ async function processP2PCommand(tweet, author) {
         tx_hash: errorCode,
         type: 'p2p_command', 
         tweet_id: tweet.id, 
-        payer_pay_tag: senderProfile.pay_tag
+        payer_pay_tag: senderProfile.pay_tag,
+        recipient_pay_tag: receiverProfile.pay_tag
       });
     }
   } catch (error) {
