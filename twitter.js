@@ -183,14 +183,30 @@ async function processReply(reply, author, campaign) {
   try {
     // 1. Double-Spend Protection: Has this reply already been handled in DB?
     const alreadyHandled = await checkIfCommandProcessed(reply.id);
-    if (alreadyHandled) return;
+    if (alreadyHandled) {
+      // Already processed - silent skip (no log needed, already in DB)
+      return;
+    }
 
     console.log(`\n📝 Processing reply from @${author.username}: "${reply.text.substring(0, 50)}..."`);
     
     // 2. Extract FIRST valid paytag only (one grant per reply)
     const targetPayTag = extractFirstPayTag(reply.text);
     if (!targetPayTag) {
-      console.log('   ⏭️ No valid pay tags found, skipping.');
+      console.log('   ⏭️ No valid pay tags found, logging skip.');
+      // LOG THIS TO PREVENT INFINITE LOOP - mark tweet as processed even if no paytag
+      await logTransaction({
+        sender_id: process.env.MONIBOT_PROFILE_ID,
+        receiver_id: process.env.MONIBOT_PROFILE_ID,
+        amount: 0,
+        fee: 0,
+        tx_hash: 'SKIP_NO_PAYTAG',
+        campaign_id: campaign.tweet_id,
+        type: 'grant',
+        tweet_id: reply.id,
+        payer_pay_tag: 'MoniBot',
+        recipient_pay_tag: null
+      });
       return;
     }
     
@@ -232,6 +248,19 @@ async function processGrantForPayTag(payTag, reply, author, campaign) {
     const currentCampaign = await getCampaignByTweetId(campaign.tweet_id);
     if (!currentCampaign) {
       console.log(`      ⏭️ Campaign not found or no longer active`);
+      // LOG to prevent infinite loop
+      await logTransaction({
+        sender_id: process.env.MONIBOT_PROFILE_ID,
+        receiver_id: targetProfile.id,
+        amount: 0,
+        fee: 0,
+        tx_hash: 'SKIP_CAMPAIGN_INACTIVE',
+        campaign_id: campaign.tweet_id,
+        type: 'grant',
+        tweet_id: reply.id,
+        payer_pay_tag: 'MoniBot',
+        recipient_pay_tag: targetProfile.pay_tag
+      });
       return;
     }
 
@@ -261,6 +290,19 @@ async function processGrantForPayTag(payTag, reply, author, campaign) {
     const alreadyGrantedDB = await checkIfAlreadyGranted(campaign.tweet_id, targetProfile.id);
     if (alreadyGrantedDB) {
       console.log(`      ⏭️ Grant already issued to ${payTag} for this campaign (DB).`);
+      // LOG to prevent infinite loop - mark this tweet as processed
+      await logTransaction({
+        sender_id: process.env.MONIBOT_PROFILE_ID,
+        receiver_id: targetProfile.id,
+        amount: 0,
+        fee: 0,
+        tx_hash: 'SKIP_DUPLICATE_GRANT_DB',
+        campaign_id: campaign.tweet_id,
+        type: 'grant',
+        tweet_id: reply.id,
+        payer_pay_tag: 'MoniBot',
+        recipient_pay_tag: targetProfile.pay_tag
+      });
       return;
     }
 
@@ -269,6 +311,19 @@ async function processGrantForPayTag(payTag, reply, author, campaign) {
     if (alreadyGrantedOnChain) {
       console.log(`      ⏭️ Grant already issued on-chain, syncing DB...`);
       await markAsGranted(campaign.tweet_id, targetProfile.id);
+      // LOG to prevent infinite loop
+      await logTransaction({
+        sender_id: process.env.MONIBOT_PROFILE_ID,
+        receiver_id: targetProfile.id,
+        amount: 0,
+        fee: 0,
+        tx_hash: 'SKIP_DUPLICATE_GRANT_ONCHAIN',
+        campaign_id: campaign.tweet_id,
+        type: 'grant',
+        tweet_id: reply.id,
+        payer_pay_tag: 'MoniBot',
+        recipient_pay_tag: targetProfile.pay_tag
+      });
       return;
     }
 
@@ -399,14 +454,26 @@ async function processP2PCommand(tweet, author) {
     // 1. Double-Spend Protection: Was this command already processed in DB?
     const alreadyHandled = await checkIfCommandProcessed(tweet.id);
     if (alreadyHandled) {
-      console.log(`   ⏭️ Command ${tweet.id} already in DB, skipping.`);
+      // Already in DB - silent skip
       return;
     }
 
     // 2. On-chain deduplication check
     const tweetAlreadyOnChain = await isTweetProcessed(tweet.id);
     if (tweetAlreadyOnChain) {
-      console.log(`   ⏭️ Tweet ${tweet.id} already processed on-chain, skipping.`);
+      console.log(`   ⏭️ Tweet ${tweet.id} already processed on-chain, logging to DB...`);
+      // Log to DB so we don't keep checking on-chain
+      await logTransaction({
+        sender_id: process.env.MONIBOT_PROFILE_ID,
+        receiver_id: process.env.MONIBOT_PROFILE_ID,
+        amount: 0,
+        fee: 0,
+        tx_hash: 'SKIP_ALREADY_ONCHAIN',
+        type: 'p2p_command',
+        tweet_id: tweet.id,
+        payer_pay_tag: author.username,
+        recipient_pay_tag: null
+      });
       return;
     }
 
@@ -425,7 +492,19 @@ async function processP2PCommand(tweet, author) {
       amount = parseFloat(payMatch[2]);
       targetPayTag = payMatch[1].toLowerCase();
     } else {
-      console.log('   ⏭️ Could not parse command syntax.');
+      console.log('   ⏭️ Could not parse command syntax, logging skip.');
+      // Log to prevent infinite loop
+      await logTransaction({
+        sender_id: process.env.MONIBOT_PROFILE_ID,
+        receiver_id: process.env.MONIBOT_PROFILE_ID,
+        amount: 0,
+        fee: 0,
+        tx_hash: 'SKIP_INVALID_SYNTAX',
+        type: 'p2p_command',
+        tweet_id: tweet.id,
+        payer_pay_tag: author.username,
+        recipient_pay_tag: null
+      });
       return;
     }
     
@@ -434,7 +513,19 @@ async function processP2PCommand(tweet, author) {
     // 4. Verify Sender exists and is verified
     const senderProfile = await getProfileByXUsername(author.username);
     if (!senderProfile) {
-      console.log(`   ❌ Sender @${author.username} not found/verified.`);
+      console.log(`   ❌ Sender @${author.username} not found/verified, logging skip.`);
+      // Log to prevent infinite loop
+      await logTransaction({
+        sender_id: process.env.MONIBOT_PROFILE_ID,
+        receiver_id: process.env.MONIBOT_PROFILE_ID,
+        amount: amount,
+        fee: 0,
+        tx_hash: 'ERROR_SENDER_NOT_FOUND',
+        type: 'p2p_command',
+        tweet_id: tweet.id,
+        payer_pay_tag: author.username,
+        recipient_pay_tag: targetPayTag
+      });
       return;
     }
     
