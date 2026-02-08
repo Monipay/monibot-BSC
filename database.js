@@ -5,6 +5,12 @@
  * All transactions are logged to monibot_transactions for the Social Agent to process.
  * 
  * Uses SERVICE_KEY (not anon key) to bypass RLS policies.
+ * 
+ * v3.0 - Added:
+ * - recipient_pay_tag support
+ * - getActiveCampaigns for DB-driven polling
+ * - syncToMainLedger for transaction mirroring
+ * - Auto campaign completion check
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -178,7 +184,6 @@ export async function markAsGranted(campaignId, profileId) {
  * This is the "Silent Worker" output - the Social Agent reads this table
  * 
  * Error codes in tx_hash field (for failed transactions):
- * - AI_REJECTED: Gemini AI rejected the grant request
  * - ERROR_TARGET_NOT_FOUND: Recipient PayTag not found in database
  * - ERROR_ALLOWANCE: Sender has insufficient allowance to MoniBotRouter
  * - ERROR_BALANCE: Sender has insufficient USDC balance
@@ -186,6 +191,7 @@ export async function markAsGranted(campaignId, profileId) {
  * - ERROR_DUPLICATE_GRANT: Grant already issued for this campaign+recipient
  * - ERROR_TREASURY_EMPTY: MoniBotRouter contract has insufficient USDC for grants
  * - ERROR_BLOCKCHAIN: Generic blockchain/network error
+ * - LIMIT_REACHED: Campaign reached max participants (not an error, just "too late")
  * 
  * @param {object} params - Transaction parameters
  */
@@ -198,45 +204,70 @@ export async function logTransaction({
   campaign_id = null, 
   type,
   tweet_id = null,
-  payer_pay_tag = null
+  payer_pay_tag = null,
+  recipient_pay_tag = null
 }) {
   // Determine status based on tx_hash
-  // If tx_hash starts with "ERROR_" or is a known error code, mark as failed
-  // LIMIT_REACHED is a special case - it's not an error, just "too late"
-  const isError = tx_hash.startsWith('ERROR_') || 
-                  tx_hash === 'AI_REJECTED' ||
-                  tx_hash === 'ERROR_TARGET_NOT_FOUND';
-  
+  const isError = tx_hash.startsWith('ERROR_');
   const isLimitReached = tx_hash === 'LIMIT_REACHED';
   
   const status = isError ? 'failed' : (isLimitReached ? 'limit_reached' : 'completed');
   
+  const insertData = {
+    sender_id,
+    receiver_id,
+    amount,
+    fee,
+    tx_hash,
+    campaign_id,
+    type,                // 'grant' or 'p2p_command'
+    tweet_id,            // ID of the tweet to be replied to
+    payer_pay_tag,       // PayTag of the sender (for display)
+    recipient_pay_tag,   // PayTag of the recipient (for display)
+    replied: false,      // Handshake flag for Social Agent
+    status,              // 'completed', 'failed', or 'limit_reached'
+    retry_count: 0,      // For VP-Social retry handling
+    created_at: new Date().toISOString()
+  };
+  
+  // Add error_reason for failed transactions
+  if (isError) {
+    insertData.error_reason = tx_hash;
+  }
+
   const { error } = await supabase
     .from('monibot_transactions')
-    .insert({
-      sender_id,
-      receiver_id,
-      amount,
-      fee,
-      tx_hash,
-      campaign_id,
-      type,                // 'grant' or 'p2p_command'
-      tweet_id,            // ID of the tweet to be replied to
-      payer_pay_tag,       // PayTag of the sender (for display)
-      replied: false,      // Handshake flag for Social Agent
-      status,              // 'completed', 'failed', or 'limit_reached'
-      created_at: new Date().toISOString()
-    });
+    .insert(insertData);
 
   if (error) {
     console.error('❌ Database log error:', error.message);
   } else {
     const emoji = isError ? '⚠️' : (isLimitReached ? '⏰' : '💾');
-    console.log(`${emoji} Transaction logged: ${type} | ${tx_hash.substring(0, 20)}...`);
+    console.log(`${emoji} Transaction logged: ${type} | ${tx_hash.substring(0, 20)}... | To: @${recipient_pay_tag || 'unknown'}`);
   }
 }
 
 // ============ Campaign Management ============
+
+/**
+ * Get all active campaigns
+ * @returns {Promise<array>} Array of active campaign objects
+ */
+export async function getActiveCampaigns() {
+  const { data, error } = await supabase
+    .from('campaigns')
+    .select('*')
+    .eq('status', 'active')
+    .order('created_at', { ascending: false })
+    .limit(10);
+  
+  if (error) {
+    console.error('❌ Error fetching active campaigns:', error.message);
+    return [];
+  }
+  
+  return data || [];
+}
 
 /**
  * Get active campaign by tweet ID
@@ -268,7 +299,7 @@ export async function incrementCampaignParticipants(tweetId, grantAmount) {
   // Fetch current campaign by tweet_id
   const { data: campaign, error: fetchError } = await supabase
     .from('campaigns')
-    .select('id, current_participants, budget_spent')
+    .select('id, current_participants, budget_spent, max_participants, budget_allocated')
     .eq('tweet_id', tweetId)
     .maybeSingle();
   
@@ -277,19 +308,87 @@ export async function incrementCampaignParticipants(tweetId, grantAmount) {
     return;
   }
   
+  const newParticipants = (campaign.current_participants || 0) + 1;
+  const newBudgetSpent = (campaign.budget_spent || 0) + grantAmount;
+  
+  // Check if campaign should be auto-completed
+  const shouldComplete = 
+    (campaign.max_participants && newParticipants >= campaign.max_participants) ||
+    (campaign.budget_allocated && newBudgetSpent >= campaign.budget_allocated);
+  
+  const updateData = {
+    current_participants: newParticipants,
+    budget_spent: newBudgetSpent
+  };
+  
+  if (shouldComplete) {
+    updateData.status = 'completed';
+    updateData.completed_at = new Date().toISOString();
+  }
+  
   // Update stats
   const { error: updateError } = await supabase
     .from('campaigns')
-    .update({
-      current_participants: (campaign.current_participants || 0) + 1,
-      budget_spent: (campaign.budget_spent || 0) + grantAmount
-    })
+    .update(updateData)
     .eq('id', campaign.id);
   
   if (updateError) {
     console.error(`❌ Error updating campaign stats:`, updateError.message);
   } else {
-    console.log(`      📊 Campaign updated: ${campaign.current_participants + 1} participants, $${(campaign.budget_spent || 0) + grantAmount} spent`);
+    const statusMsg = shouldComplete ? ' [COMPLETED]' : '';
+    console.log(`      📊 Campaign updated: ${newParticipants} participants, $${newBudgetSpent} spent${statusMsg}`);
+  }
+}
+
+/**
+ * Check and auto-complete campaigns that have reached limits
+ */
+export async function checkAndCompleteCampaigns() {
+  const { data: activeCampaigns, error } = await supabase
+    .from('campaigns')
+    .select('*')
+    .eq('status', 'active');
+  
+  if (error || !activeCampaigns) {
+    console.error('Error checking campaigns:', error?.message);
+    return;
+  }
+  
+  for (const campaign of activeCampaigns) {
+    let shouldComplete = false;
+    let reason = '';
+    
+    // Check participant limit
+    if (campaign.max_participants && campaign.current_participants >= campaign.max_participants) {
+      shouldComplete = true;
+      reason = 'max_participants';
+    }
+    
+    // Check budget limit
+    if (campaign.budget_allocated && campaign.budget_spent >= campaign.budget_allocated) {
+      shouldComplete = true;
+      reason = 'budget_exhausted';
+    }
+    
+    // Check expiry
+    if (campaign.expires_at && new Date(campaign.expires_at) < new Date()) {
+      shouldComplete = true;
+      reason = 'expired';
+    }
+    
+    if (shouldComplete) {
+      const { error: updateError } = await supabase
+        .from('campaigns')
+        .update({ 
+          status: 'completed',
+          completed_at: new Date().toISOString()
+        })
+        .eq('id', campaign.id);
+      
+      if (!updateError) {
+        console.log(`📊 Campaign ${campaign.id.substring(0, 8)} completed (${reason})`);
+      }
+    }
   }
 }
 
@@ -322,6 +421,65 @@ export async function updateCampaignStats(campaignId, grantAmount) {
   
   if (updateError) {
     console.error(`❌ Error updating campaign stats:`, updateError.message);
+  }
+}
+
+// ============ Transaction Sync to Main Ledger ============
+
+/**
+ * Sync a MoniBot transaction to the main transactions table
+ * This ensures users see grants/p2p in their normal transaction history
+ * 
+ * @param {object} params - Transaction parameters
+ */
+export async function syncToMainLedger({
+  senderWalletAddress,
+  receiverWalletAddress,
+  senderPayTag,
+  receiverPayTag,
+  amount,
+  fee,
+  txHash,
+  monibotType,
+  tweetId = null,
+  campaignId = null,
+  campaignName = null
+}) {
+  try {
+    const response = await fetch(
+      `${process.env.SUPABASE_URL}/functions/v1/monibot-sync`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+        },
+        body: JSON.stringify({
+          action: 'logTransaction',
+          senderWalletAddress,
+          receiverWalletAddress,
+          senderPayTag,
+          receiverPayTag,
+          amount,
+          fee,
+          txHash,
+          monibotType,
+          tweetId,
+          campaignId,
+          campaignName
+        }),
+      }
+    );
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('      ❌ Sync to main ledger failed:', errorText);
+    } else {
+      console.log('      📋 Synced to main transactions ledger');
+    }
+  } catch (error) {
+    console.error('      ❌ Sync error:', error.message);
+    // Don't throw - this is a non-critical operation
   }
 }
 
