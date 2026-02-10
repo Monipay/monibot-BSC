@@ -1,7 +1,7 @@
 {
-  "name": "monibot-worker",
-  "version": "2.1.0",
-  "description": "MoniBot Silent Worker - Autonomous transaction layer for MoniPay",
+  "name": "monibot-worker-bsc",
+  "version": "1.0.0",
+  "description": "MoniBot Silent Worker for BSC - Autonomous USDT transaction layer for MoniPay",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -23,11 +23,11 @@
     "monibot",
     "monipay",
     "twitter-bot",
-    "usdc",
-    "base-chain",
+    "usdt",
+    "bsc",
+    "bnb-chain",
     "blockchain"
   ],
   "author": "MoniPay",
   "license": "MIT"
 }
-
