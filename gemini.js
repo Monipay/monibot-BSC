@@ -4,8 +4,7 @@
  * This module uses Google Gemini to evaluate campaign replies.
  * It determines if a reply deserves a grant and how much.
  * 
- * Uses direct Gemini API (not Lovable AI Gateway) since this runs
- * on an external server, not Supabase Edge Functions.
+ * Updated for BSC/USDT context.
  */
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -21,7 +20,8 @@ export function initGemini() {
   
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
   
-  // Using Gemini 2.0 Flash for fast, cost-effective evaluation
+  // Using Gemini 2.0 Flash (or 1.5 if preferred) for fast, cost-effective evaluation
+  // Ensure your API key supports the model version specified here
   geminiModel = genAI.getGenerativeModel({ 
     model: 'gemini-1.5-flash',
     generationConfig: {
@@ -37,14 +37,6 @@ export function initGemini() {
 
 /**
  * Evaluate a campaign reply to determine grant eligibility
- * 
- * @param {object} context - Evaluation context
- * @param {string} context.campaignTweet - The original campaign tweet text
- * @param {string} context.reply - The user's reply text
- * @param {string} context.replyAuthor - Twitter username of the reply author
- * @param {string} context.targetPayTag - PayTag mentioned in the reply
- * @param {boolean} context.isNewUser - Whether the target is a new user (< 7 days)
- * @returns {Promise<{approved: boolean, amount: number, reasoning: string}>}
  */
 export async function evaluateCampaignReply(context) {
   const prompt = buildEvaluationPrompt(context);
@@ -77,9 +69,10 @@ export async function evaluateCampaignReply(context) {
 // ============ Prompt Building ============
 
 function buildEvaluationPrompt(context) {
-  return `You are MoniBot, an autonomous marketing fund manager for MoniPay (a gasless USDC payment app on Base).
+  // UPDATED CONTEXT: USDT on BSC
+  return `You are MoniBot, an autonomous marketing fund manager for MoniPay (a gasless USDT payment app on BNB Smart Chain).
 
-Your job is to evaluate campaign replies and decide if they deserve a USDC grant.
+Your job is to evaluate campaign replies and decide if they deserve a USDT grant.
 
 === CONTEXT ===
 CAMPAIGN TWEET: "${context.campaignTweet}"
@@ -94,7 +87,7 @@ IS NEW USER: ${context.isNewUser ? 'Yes (joined < 7 days ago)' : 'No (existing u
 3. Is this spam, bot behavior, or low-effort farming?
 4. Would rewarding this reply encourage quality engagement?
 
-=== GRANT TIERS ===
+=== GRANT TIERS (USDT) ===
 - REJECT ($0.00): Spam, bots, low-effort, off-topic, or suspicious
 - MINIMAL ($0.10): Basic participation, existing user
 - STANDARD ($0.25): Good engagement, new user bonus
@@ -117,14 +110,14 @@ Your decision:`;
 // ============ Response Parsing ============
 
 function parseEvaluationResponse(text) {
-  // Clean the response text
+  // Clean the response text to ensure valid JSON
   let cleanText = text
     .replace(/```json\n?/gi, '')
     .replace(/```\n?/g, '')
     .replace(/^\s*\n/gm, '')
     .trim();
   
-  // Try to extract JSON if there's extra text
+  // Try to extract JSON if there's extra text around it
   const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     cleanText = jsonMatch[0];
@@ -144,10 +137,10 @@ function parseEvaluationResponse(text) {
       json.reasoning = json.approved ? 'Approved by AI' : 'Rejected by AI';
     }
     
-    // Clamp amount to valid range
+    // Clamp amount to valid range (0.0 to 1.0)
     json.amount = Math.min(Math.max(json.amount, 0), 1.0);
     
-    // If not approved, amount must be 0
+    // If not approved, force amount to 0
     if (!json.approved) {
       json.amount = 0;
     }
@@ -158,7 +151,7 @@ function parseEvaluationResponse(text) {
     console.error('❌ Failed to parse AI response:', parseError.message);
     console.error('   Raw text:', cleanText.substring(0, 200));
     
-    // Return safe default
+    // Return safe default: Reject
     return {
       approved: false,
       amount: 0,
@@ -171,7 +164,6 @@ function parseEvaluationResponse(text) {
 
 /**
  * Test the Gemini connection with a simple prompt
- * Useful for debugging connection issues
  */
 export async function testGeminiConnection() {
   try {
@@ -191,11 +183,7 @@ export async function testGeminiConnection() {
 
 /**
  * Evaluate a natural language time expression using Gemini
- * Used as fallback when chrono-node can't parse the expression
- * 
- * @param {string} text - Text containing time expression
- * @param {Date} referenceDate - Reference date for relative times
- * @returns {Promise<{scheduledAt: string, interpreted: string, confidence: string}>}
+ * (Used for future scheduling features)
  */
 export async function evaluateTimeExpression(text, referenceDate = new Date()) {
   const prompt = `You are a time parser. Extract the scheduled time from the following text.
