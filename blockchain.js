@@ -1,38 +1,32 @@
 /**
- * MoniBot Worker - Blockchain Module (BSC Router-Based)
+ * MoniBot BSC Worker - Blockchain Module (Router-Based)
  * 
- * This module uses the MoniBotRouter smart contract on BNB Smart Chain.
- * It interacts with USDT (18 decimals on BSC) instead of USDC (6 decimals on Base).
+ * BSC variant: Uses USDT (18 decimals) on BNB Smart Chain (Chain ID 56).
+ * The bot's wallet is an authorized EXECUTOR on the MoniBotRouter contract.
  * 
- * Key Changes for BSC:
- * - Network: BSC Mainnet (Chain ID 56)
- * - Token: USDT (0x55d3...) - 18 Decimals
- * - Router: MoniBotRouter (BSC Deployment)
- * 
- * Architecture:
- * - Users approve MoniBotRouter, NOT the bot's wallet
- * - Contract handles atomic fee splitting
- * - Nonce-based replay protection
+ * Key Differences from Base Worker:
+ * - Chain: BSC Mainnet (56) instead of Base (8453)
+ * - Token: USDT instead of USDC
+ * - Decimals: 18 instead of 6
+ * - Router: 0x9EED... instead of 0xBEE3...
  */
 
 import { createPublicClient, createWalletClient, http, parseUnits, formatUnits, erc20Abi } from 'viem';
-import { bsc } from 'viem/chains'; // CHANGED: Base -> BSC
+import { bsc } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 
 // ============ Configuration ============
 
-// Uses the new BSC environment variables
-const MONIBOT_ROUTER_ADDRESS = process.env.MONIBOT_BSC_ROUTER_ADDRESS; 
-const USDT_ADDRESS = process.env.USDT_ADDRESS; 
+const MONIBOT_ROUTER_ADDRESS = '0x9EED3cF32690FfFaD0b8BB44CaC65B3B801c832E';
+const USDT_ADDRESS = '0x55d398326f99059fF775485246999027B3197955';
+const TOKEN_DECIMALS = 18;
 
 // ============ Clients (RPC failover + retry) ============
 
 const RPC_URLS = [
   process.env.BSC_RPC_URL,
-  'https://bsc-dataseed.binance.org/',
-  'https://bsc-dataseed1.defibit.io/',
-  'https://bsc-dataseed1.ninicoin.io/',
-  'https://binance.llamarpc.com'
+  'https://bsc-dataseed.binance.org',
+  'https://bsc-rpc.publicnode.com',
 ].filter(Boolean);
 
 let rpcIndex = 0;
@@ -76,7 +70,7 @@ function rebuildClients() {
   });
 }
 
-// ============ MoniBotRouter ABI (Router Interface) ============
+// ============ MoniBotRouter ABI (Partial) ============
 
 const moniBotRouterAbi = [
   {
@@ -143,23 +137,9 @@ const moniBotRouterAbi = [
 
 /**
  * Execute a P2P transfer via the MoniBotRouter contract on BSC
- * Used for social payment commands (e.g., "@monibot send $5 to @alice")
- * 
- * The contract atomically:
- * 1. Transfers (amount - fee) to recipient
- * 2. Transfers fee to platform treasury
- * 3. Increments user's nonce
- * 4. Marks tweetId as used
- * 
- * @param {string} fromAddress - Sender's wallet address
- * @param {string} toAddress - Recipient's wallet address  
- * @param {number} amount - Gross amount in USDT (fee will be deducted by contract)
- * @param {string} tweetId - Tweet ID for deduplication
- * @returns {Promise<{hash: string, fee: number}>} Transaction hash and fee charged
  */
 export async function executeP2PViaRouter(fromAddress, toAddress, amount, tweetId) {
-  // CHANGED: 18 decimals for USDT on BSC
-  const amountInUnits = parseUnits(amount.toFixed(18), 18);
+  const amountInUnits = parseUnits(amount.toFixed(18), TOKEN_DECIMALS);
   
   // --- 1. PRE-FLIGHT CHECKS ---
   let nonce, balance, allowance, isTweetUsed;
@@ -198,7 +178,7 @@ export async function executeP2PViaRouter(fromAddress, toAddress, amount, tweetI
       console.warn('  ⚠️ RPC rate limited during preflight; retrying on fallback RPC...');
       rotateRpc();
       rebuildClients();
-      [nonce, balance, allowance, isTweetUsed] = await runPreflight();
+      ;[nonce, balance, allowance, isTweetUsed] = await runPreflight();
     } else {
       throw err;
     }
@@ -206,23 +186,20 @@ export async function executeP2PViaRouter(fromAddress, toAddress, amount, tweetI
 
   console.log(`  🔍 Pre-flight Check for ${fromAddress}:`);
   console.log(`     Nonce: ${nonce}`);
-  console.log(`     Balance: ${formatUnits(balance, 18)} USDT`); // CHANGED: 18 decimals
-  console.log(`     Allowance (to Router): ${formatUnits(allowance, 18)} USDT`); // CHANGED: 18 decimals
+  console.log(`     Balance: ${formatUnits(balance, TOKEN_DECIMALS)} USDT`);
+  console.log(`     Allowance (to Router): ${formatUnits(allowance, TOKEN_DECIMALS)} USDT`);
   console.log(`     Amount Requested: ${amount} USDT`);
 
-  // Check if tweet already processed
   if (isTweetUsed) {
     throw new Error('ERROR_DUPLICATE_TWEET');
   }
 
-  // Check balance
   if (balance < amountInUnits) {
-    throw new Error(`ERROR_BALANCE:Has ${formatUnits(balance, 18)}, needs ${amount}`);
+    throw new Error(`ERROR_BALANCE:Has ${formatUnits(balance, TOKEN_DECIMALS)}, needs ${amount}`);
   }
 
-  // Check allowance (user must approve MoniBotRouter)
   if (allowance < amountInUnits) {
-    throw new Error(`ERROR_ALLOWANCE:Approved ${formatUnits(allowance, 18)}, needs ${amount}`);
+    throw new Error(`ERROR_ALLOWANCE:Approved ${formatUnits(allowance, TOKEN_DECIMALS)}, needs ${amount}`);
   }
 
   // --- 2. CALCULATE FEE (for logging) ---
@@ -232,13 +209,12 @@ export async function executeP2PViaRouter(fromAddress, toAddress, amount, tweetI
     functionName: 'calculateFee',
     args: [amountInUnits]
   });
-  const feeAmount = parseFloat(formatUnits(fee, 18)); // CHANGED: 18 decimals
+  const feeAmount = parseFloat(formatUnits(fee, TOKEN_DECIMALS));
   console.log(`     Fee: ${feeAmount} USDT`);
 
   // --- 3. EXECUTE VIA ROUTER ---
-  console.log(`     🚀 Executing P2P via BSC Router...`);
+  console.log(`     🚀 Executing P2P via Router (BSC)...`);
 
-  // Explicit gas estimation with buffer
   const estimate = async () => publicClient.estimateContractGas({
     address: MONIBOT_ROUTER_ADDRESS,
     abi: moniBotRouterAbi,
@@ -261,7 +237,7 @@ export async function executeP2PViaRouter(fromAddress, toAddress, amount, tweetI
     }
   }
 
-  const gasLimit = gas + gas / 5n; // +20% buffer for safety
+  const gasLimit = gas + gas / 5n; // +20% buffer
 
   const hash = await walletClient.writeContract({
     address: MONIBOT_ROUTER_ADDRESS,
@@ -272,23 +248,16 @@ export async function executeP2PViaRouter(fromAddress, toAddress, amount, tweetI
   });
 
   await publicClient.waitForTransactionReceipt({ hash });
-  console.log(`     ✅ P2P executed. Hash: ${hash}`);
+  console.log(`     ✅ P2P executed on BSC. Hash: ${hash}`);
 
   return { hash, fee: feeAmount };
 }
 
 /**
- * Execute a campaign grant via the MoniBotRouter contract
- * Used for promotional distributions (e.g., "Reply to win $1")
- * 
- * The contract:
- * 1. Transfers (amount - fee) from contract balance to recipient
- * 2. Transfers fee to platform treasury
- * 3. Marks campaignId + recipient as granted (prevents duplicates)
+ * Execute a campaign grant via the MoniBotRouter contract on BSC
  */
 export async function executeGrantViaRouter(toAddress, amount, campaignId) {
-  // CHANGED: 18 decimals for USDT on BSC
-  const amountInUnits = parseUnits(amount.toFixed(18), 18);
+  const amountInUnits = parseUnits(amount.toFixed(18), TOKEN_DECIMALS);
 
   // --- 1. PRE-FLIGHT CHECKS ---
   let isGrantIssued, contractBalance;
@@ -315,25 +284,23 @@ export async function executeGrantViaRouter(toAddress, amount, campaignId) {
       console.warn('  ⚠️ RPC rate limited during grant preflight; retrying on fallback RPC...');
       rotateRpc();
       rebuildClients();
-      [isGrantIssued, contractBalance] = await runGrantPreflight();
+      ;[isGrantIssued, contractBalance] = await runGrantPreflight();
     } else {
       throw err;
     }
   }
 
-  console.log(`  🔍 Pre-flight Check for Grant:`);
+  console.log(`  🔍 Pre-flight Check for Grant (BSC):`);
   console.log(`     Recipient: ${toAddress}`);
   console.log(`     Campaign: ${campaignId}`);
-  console.log(`     Contract Balance: ${formatUnits(contractBalance, 18)} USDT`);
+  console.log(`     Contract Balance: ${formatUnits(contractBalance, TOKEN_DECIMALS)} USDT`);
 
-  // Check if already granted
   if (isGrantIssued) {
     throw new Error('ERROR_DUPLICATE_GRANT');
   }
 
-  // Check contract has enough balance
   if (contractBalance < amountInUnits) {
-    throw new Error(`ERROR_CONTRACT_BALANCE:Has ${formatUnits(contractBalance, 18)}, needs ${amount}`);
+    throw new Error(`ERROR_CONTRACT_BALANCE:Has ${formatUnits(contractBalance, TOKEN_DECIMALS)}, needs ${amount}`);
   }
 
   // --- 2. CALCULATE FEE (for logging) ---
@@ -343,11 +310,11 @@ export async function executeGrantViaRouter(toAddress, amount, campaignId) {
     functionName: 'calculateFee',
     args: [amountInUnits]
   });
-  const feeAmount = parseFloat(formatUnits(fee, 18)); // CHANGED: 18 decimals
+  const feeAmount = parseFloat(formatUnits(fee, TOKEN_DECIMALS));
   console.log(`     Fee: ${feeAmount} USDT`);
 
   // --- 3. EXECUTE VIA ROUTER ---
-  console.log(`     🚀 Executing Grant via BSC Router...`);
+  console.log(`     🚀 Executing Grant via Router (BSC)...`);
 
   const estimate = async () => publicClient.estimateContractGas({
     address: MONIBOT_ROUTER_ADDRESS,
@@ -382,16 +349,13 @@ export async function executeGrantViaRouter(toAddress, amount, campaignId) {
   });
 
   await publicClient.waitForTransactionReceipt({ hash });
-  console.log(`     ✅ Grant executed. Hash: ${hash}`);
+  console.log(`     ✅ Grant executed on BSC. Hash: ${hash}`);
 
   return { hash, fee: feeAmount };
 }
 
 // ============ View Functions ============
 
-/**
- * Get user's current nonce from the Router contract
- */
 export async function getUserNonce(userAddress) {
   return publicClient.readContract({
     address: MONIBOT_ROUTER_ADDRESS,
@@ -401,9 +365,6 @@ export async function getUserNonce(userAddress) {
   });
 }
 
-/**
- * Get user's USDT allowance to the MoniBotRouter
- */
 export async function getOnchainAllowance(userAddress) {
   const allowance = await publicClient.readContract({
     address: USDT_ADDRESS,
@@ -412,13 +373,9 @@ export async function getOnchainAllowance(userAddress) {
     args: [userAddress, MONIBOT_ROUTER_ADDRESS]
   });
   
-  return parseFloat(formatUnits(allowance, 18)); // CHANGED: 18 decimals
+  return parseFloat(formatUnits(allowance, TOKEN_DECIMALS));
 }
 
-/**
- * Get user's USDT balance
- * Renamed to getUSDTBalance for clarity, but logic is same
- */
 export async function getUSDTBalance(userAddress) {
   const balance = await publicClient.readContract({
     address: USDT_ADDRESS,
@@ -427,12 +384,9 @@ export async function getUSDTBalance(userAddress) {
     args: [userAddress]
   });
   
-  return parseFloat(formatUnits(balance, 18)); // CHANGED: 18 decimals
+  return parseFloat(formatUnits(balance, TOKEN_DECIMALS));
 }
 
-/**
- * Check if a tweet has already been processed
- */
 export async function isTweetProcessed(tweetId) {
   return publicClient.readContract({
     address: MONIBOT_ROUTER_ADDRESS,
@@ -442,9 +396,6 @@ export async function isTweetProcessed(tweetId) {
   });
 }
 
-/**
- * Check if a grant has already been issued for a campaign + recipient
- */
 export async function isGrantAlreadyIssued(campaignId, recipientAddress) {
   return publicClient.readContract({
     address: MONIBOT_ROUTER_ADDRESS,
@@ -454,11 +405,8 @@ export async function isGrantAlreadyIssued(campaignId, recipientAddress) {
   });
 }
 
-/**
- * Calculate fee for a given amount
- */
 export async function calculateFee(amount) {
-  const amountInUnits = parseUnits(amount.toFixed(18), 18); // CHANGED: 18 decimals
+  const amountInUnits = parseUnits(amount.toFixed(18), TOKEN_DECIMALS);
   
   const [fee, netAmount] = await publicClient.readContract({
     address: MONIBOT_ROUTER_ADDRESS,
@@ -468,8 +416,8 @@ export async function calculateFee(amount) {
   });
   
   return {
-    fee: parseFloat(formatUnits(fee, 18)),
-    netAmount: parseFloat(formatUnits(netAmount, 18))
+    fee: parseFloat(formatUnits(fee, TOKEN_DECIMALS)),
+    netAmount: parseFloat(formatUnits(netAmount, TOKEN_DECIMALS))
   };
 }
 
