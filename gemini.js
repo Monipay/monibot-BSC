@@ -1,10 +1,7 @@
 /**
- * MoniBot Worker - AI Module (Gemini)
+ * MoniBot BSC Worker - AI Module (Gemini)
  * 
- * This module uses Google Gemini to evaluate campaign replies.
- * It determines if a reply deserves a grant and how much.
- * 
- * Updated for BSC/USDT context.
+ * Same as Base worker but system prompt explicitly states BSC/USDT context.
  */
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -20,24 +17,19 @@ export function initGemini() {
   
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
   
-  // Using Gemini 2.0 Flash (or 1.5 if preferred) for fast, cost-effective evaluation
-  // Ensure your API key supports the model version specified here
   geminiModel = genAI.getGenerativeModel({ 
     model: 'gemini-1.5-flash',
     generationConfig: {
-      temperature: 0.3, // Lower temperature for more consistent decisions
+      temperature: 0.3,
       maxOutputTokens: 256,
     }
   });
   
-  console.log('✅ Gemini AI initialized (gemini-1.5-flash)');
+  console.log('✅ Gemini AI initialized (gemini-1.5-flash) [BSC Worker]');
 }
 
 // ============ Campaign Evaluation ============
 
-/**
- * Evaluate a campaign reply to determine grant eligibility
- */
 export async function evaluateCampaignReply(context) {
   const prompt = buildEvaluationPrompt(context);
 
@@ -46,7 +38,6 @@ export async function evaluateCampaignReply(context) {
     const response = await result.response;
     const text = response.text();
     
-    // Parse and validate response
     const evaluation = parseEvaluationResponse(text);
     
     console.log(`      🧠 AI Decision: ${evaluation.approved ? '✅ Approved' : '❌ Rejected'} ($${evaluation.amount})`);
@@ -57,7 +48,6 @@ export async function evaluateCampaignReply(context) {
   } catch (error) {
     console.error('❌ Gemini evaluation error:', error.message);
     
-    // Safe-fail: Reject on error to prevent exploitation
     return {
       approved: false,
       amount: 0,
@@ -69,8 +59,7 @@ export async function evaluateCampaignReply(context) {
 // ============ Prompt Building ============
 
 function buildEvaluationPrompt(context) {
-  // UPDATED CONTEXT: USDT on BSC
-  return `You are MoniBot, an autonomous marketing fund manager for MoniPay (a gasless USDT payment app on BNB Smart Chain).
+  return `You are MoniBot, an autonomous marketing fund manager for MoniPay (a gasless payment app). You are operating on BNB Smart Chain (BSC) using USDT.
 
 Your job is to evaluate campaign replies and decide if they deserve a USDT grant.
 
@@ -80,6 +69,8 @@ REPLY: "${context.reply}"
 REPLY AUTHOR: @${context.replyAuthor}
 TARGET PAY_TAG: @${context.targetPayTag}
 IS NEW USER: ${context.isNewUser ? 'Yes (joined < 7 days ago)' : 'No (existing user)'}
+CHAIN: BNB Smart Chain (BSC)
+TOKEN: USDT (18 decimals)
 
 === EVALUATION CRITERIA ===
 1. Does the reply genuinely engage with the campaign? (not just "nice" or emoji spam)
@@ -87,7 +78,7 @@ IS NEW USER: ${context.isNewUser ? 'Yes (joined < 7 days ago)' : 'No (existing u
 3. Is this spam, bot behavior, or low-effort farming?
 4. Would rewarding this reply encourage quality engagement?
 
-=== GRANT TIERS (USDT) ===
+=== GRANT TIERS ===
 - REJECT ($0.00): Spam, bots, low-effort, off-topic, or suspicious
 - MINIMAL ($0.10): Basic participation, existing user
 - STANDARD ($0.25): Good engagement, new user bonus
@@ -110,14 +101,12 @@ Your decision:`;
 // ============ Response Parsing ============
 
 function parseEvaluationResponse(text) {
-  // Clean the response text to ensure valid JSON
   let cleanText = text
     .replace(/```json\n?/gi, '')
     .replace(/```\n?/g, '')
     .replace(/^\s*\n/gm, '')
     .trim();
   
-  // Try to extract JSON if there's extra text around it
   const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     cleanText = jsonMatch[0];
@@ -126,7 +115,6 @@ function parseEvaluationResponse(text) {
   try {
     const json = JSON.parse(cleanText);
     
-    // Validate required fields
     if (typeof json.approved !== 'boolean') {
       throw new Error('Missing or invalid "approved" field');
     }
@@ -137,10 +125,8 @@ function parseEvaluationResponse(text) {
       json.reasoning = json.approved ? 'Approved by AI' : 'Rejected by AI';
     }
     
-    // Clamp amount to valid range (0.0 to 1.0)
     json.amount = Math.min(Math.max(json.amount, 0), 1.0);
     
-    // If not approved, force amount to 0
     if (!json.approved) {
       json.amount = 0;
     }
@@ -151,7 +137,6 @@ function parseEvaluationResponse(text) {
     console.error('❌ Failed to parse AI response:', parseError.message);
     console.error('   Raw text:', cleanText.substring(0, 200));
     
-    // Return safe default: Reject
     return {
       approved: false,
       amount: 0,
@@ -162,9 +147,6 @@ function parseEvaluationResponse(text) {
 
 // ============ Utility Functions ============
 
-/**
- * Test the Gemini connection with a simple prompt
- */
 export async function testGeminiConnection() {
   try {
     const result = await geminiModel.generateContent('Reply with just "OK" if you can read this.');
@@ -181,10 +163,6 @@ export async function testGeminiConnection() {
 
 // ============ Time Expression Parsing ============
 
-/**
- * Evaluate a natural language time expression using Gemini
- * (Used for future scheduling features)
- */
 export async function evaluateTimeExpression(text, referenceDate = new Date()) {
   const prompt = `You are a time parser. Extract the scheduled time from the following text.
 
@@ -208,7 +186,6 @@ If you cannot parse a time, respond with:
     const response = await result.response;
     const text = response.text();
     
-    // Clean and parse response
     let cleanText = text
       .replace(/```json\n?/gi, '')
       .replace(/```\n?/g, '')
