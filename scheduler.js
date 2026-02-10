@@ -1,13 +1,8 @@
 /**
- * MoniBot Scheduler - Temporal Intelligence Module
+ * MoniBot BSC Worker - Scheduler Module
  * 
- * Handles scheduled jobs like:
- * - Random picks ("pick 5 random people in 5 hours")
- * - Campaign posts (scheduled tweets)
- * - Reminders
- * 
- * Uses chrono-node for natural language time parsing
- * and Gemini for complex time expressions.
+ * Identical to Base worker scheduler - handles scheduled jobs.
+ * Same logic, shared database tables.
  */
 
 import * as chrono from 'chrono-node';
@@ -16,16 +11,7 @@ import { evaluateTimeExpression } from './gemini.js';
 
 // ============ Time Parsing ============
 
-/**
- * Parse natural language time expression to a Date
- * Uses chrono-node first, falls back to Gemini for complex expressions
- * 
- * @param {string} text - Natural language text containing time
- * @param {Date} referenceDate - Reference date for relative times
- * @returns {Promise<{scheduledAt: Date, confidence: string, parsed: string}>}
- */
 export async function parseTimeExpression(text, referenceDate = new Date()) {
-  // Try chrono-node first (fast, local)
   const chronoResults = chrono.parse(text, referenceDate);
   
   if (chronoResults.length > 0) {
@@ -38,7 +24,6 @@ export async function parseTimeExpression(text, referenceDate = new Date()) {
     };
   }
   
-  // Fall back to Gemini for complex expressions
   try {
     const geminiResult = await evaluateTimeExpression(text, referenceDate);
     if (geminiResult.scheduledAt) {
@@ -58,17 +43,6 @@ export async function parseTimeExpression(text, referenceDate = new Date()) {
 
 // ============ Job Creation ============
 
-/**
- * Create a scheduled job
- * 
- * @param {Object} params
- * @param {string} params.type - Job type: 'random_pick', 'campaign_post', 'reminder'
- * @param {Date} params.scheduledAt - When to execute
- * @param {Object} params.payload - Job-specific data
- * @param {string} params.sourceTweetId - Tweet that triggered this job
- * @param {string} params.sourceAuthorId - Twitter user ID
- * @param {string} params.sourceAuthorUsername - Twitter username
- */
 export async function createScheduledJob({
   type,
   scheduledAt,
@@ -103,11 +77,6 @@ export async function createScheduledJob({
 
 // ============ Job Polling ============
 
-/**
- * Get all jobs that are due for execution
- * 
- * @returns {Promise<Array>} Array of due jobs
- */
 export async function getDueJobs() {
   const supabase = getSupabase();
   
@@ -116,7 +85,7 @@ export async function getDueJobs() {
     .select('*')
     .eq('status', 'pending')
     .lte('scheduled_at', new Date().toISOString())
-    .lt('attempts', 3) // Don't retry too many times
+    .lt('attempts', 3)
     .order('scheduled_at', { ascending: true })
     .limit(10);
   
@@ -128,9 +97,6 @@ export async function getDueJobs() {
   return data || [];
 }
 
-/**
- * Mark job as processing (claim it)
- */
 export async function claimJob(jobId) {
   const supabase = getSupabase();
   
@@ -139,19 +105,17 @@ export async function claimJob(jobId) {
     .update({
       status: 'processing',
       started_at: new Date().toISOString(),
-      attempts: supabase.rpc ? undefined : 1 // Increment handled below
+      attempts: supabase.rpc ? undefined : 1
     })
     .eq('id', jobId)
-    .eq('status', 'pending') // Only claim if still pending
+    .eq('status', 'pending')
     .select()
     .single();
   
   if (error || !data) {
-    // Job was claimed by another worker or doesn't exist
     return null;
   }
   
-  // Increment attempts
   await supabase
     .from('scheduled_jobs')
     .update({ attempts: (data.attempts || 0) + 1 })
@@ -160,9 +124,6 @@ export async function claimJob(jobId) {
   return data;
 }
 
-/**
- * Mark job as completed
- */
 export async function completeJob(jobId, result) {
   const supabase = getSupabase();
   
@@ -178,9 +139,6 @@ export async function completeJob(jobId, result) {
   console.log(`✅ Job ${jobId} completed`);
 }
 
-/**
- * Mark job as failed
- */
 export async function failJob(jobId, errorMessage) {
   const supabase = getSupabase();
   
@@ -193,7 +151,6 @@ export async function failJob(jobId, errorMessage) {
   const attempts = data?.attempts || 1;
   const maxAttempts = data?.max_attempts || 3;
   
-  // If we've hit max attempts, mark as failed permanently
   const newStatus = attempts >= maxAttempts ? 'failed' : 'pending';
   
   await supabase
@@ -201,7 +158,7 @@ export async function failJob(jobId, errorMessage) {
     .update({
       status: newStatus,
       error_message: errorMessage,
-      started_at: null // Clear started_at so it can be retried
+      started_at: null
     })
     .eq('id', jobId);
   
@@ -214,40 +171,27 @@ export async function failJob(jobId, errorMessage) {
 
 // ============ Job Execution ============
 
-/**
- * Execute a random pick job
- * Picks N random users who replied to a tweet
- */
 async function executeRandomPick(job) {
   const { payload, source_tweet_id } = job;
   const { count, grant_amount } = payload;
   
   console.log(`🎲 Executing random pick: ${count} winners for tweet ${source_tweet_id}`);
   
-  // This will be implemented in twitter.js
-  // For now, return the job config
   return {
     type: 'random_pick',
     count,
     grant_amount,
     source_tweet_id,
-    // Winners will be populated by the execution logic
     winners: []
   };
 }
 
-/**
- * Execute a campaign post job
- * Posts a scheduled tweet/campaign
- */
 async function executeCampaignPost(job) {
   const { payload } = job;
   const { message, budget, grant_amount, max_participants } = payload;
   
   console.log(`📢 Executing campaign post: "${message?.substring(0, 50)}..."`);
   
-  // This will be implemented by VP-Social
-  // Worker just marks the job as ready for VP-Social to pick up
   return {
     type: 'campaign_post',
     message,
@@ -258,9 +202,6 @@ async function executeCampaignPost(job) {
   };
 }
 
-/**
- * Main job executor
- */
 export async function executeJob(job) {
   const { type } = job;
   
@@ -278,10 +219,6 @@ export async function executeJob(job) {
 
 // ============ Main Scheduler Loop ============
 
-/**
- * Process all due jobs
- * Called from the main worker loop
- */
 export async function processScheduledJobs() {
   const dueJobs = await getDueJobs();
   
@@ -292,7 +229,6 @@ export async function processScheduledJobs() {
   console.log(`⏰ Found ${dueJobs.length} due job(s)`);
   
   for (const job of dueJobs) {
-    // Try to claim the job
     const claimed = await claimJob(job.id);
     if (!claimed) {
       console.log(`⏭️ Job ${job.id} already claimed, skipping`);
@@ -311,17 +247,9 @@ export async function processScheduledJobs() {
 
 // ============ Command Parsing ============
 
-/**
- * Parse a scheduled command from a tweet
- * Example: "@monibot pick 5 random people in 5 hours"
- * 
- * @param {string} text - Tweet text
- * @returns {Promise<Object|null>} Parsed command or null
- */
 export async function parseScheduledCommand(text) {
   const lowerText = text.toLowerCase();
   
-  // Pattern: pick N random in TIME
   const randomPickMatch = lowerText.match(/pick\s+(\d+)\s+random.*?(in\s+.+|at\s+.+|tomorrow|tonight)/i);
   
   if (randomPickMatch) {
@@ -333,13 +261,12 @@ export async function parseScheduledCommand(text) {
     
     return {
       type: 'random_pick',
-      count: Math.min(count, 50), // Cap at 50
+      count: Math.min(count, 50),
       scheduledAt: timeResult.scheduledAt,
       timePhrase: timeResult.parsed
     };
   }
   
-  // Pattern: post/tweet in TIME
   const campaignMatch = lowerText.match(/(post|tweet|announce).*?(in\s+.+|at\s+.+|tomorrow|tonight)/i);
   
   if (campaignMatch) {
