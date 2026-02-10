@@ -1,16 +1,11 @@
 /**
- * MoniBot Worker - Database Module (Supabase)
+ * MoniBot BSC Worker - Database Module (Supabase)
  * 
- * This module handles all database operations for the Silent Worker.
- * All transactions are logged to monibot_transactions for the Social Agent to process.
+ * Identical to Base worker - shared database, same tables.
+ * All BSC transactions are logged to the same monibot_transactions table.
+ * Network identification is injected via metadata in the transaction log.
  * 
  * Uses SERVICE_KEY (not anon key) to bypass RLS policies.
- * 
- * v3.0 - Added:
- * - recipient_pay_tag support
- * - getActiveCampaigns for DB-driven polling
- * - syncToMainLedger for transaction mirroring
- * - Auto campaign completion check
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -28,13 +23,9 @@ export function initSupabase() {
     process.env.SUPABASE_URL,
     process.env.SUPABASE_SERVICE_KEY
   );
-  console.log('✅ Supabase initialized (Service Role)');
+  console.log('✅ Supabase initialized (Service Role) [BSC Worker]');
 }
 
-/**
- * Get the Supabase client instance
- * Used by other modules (scheduler, etc.)
- */
 export function getSupabase() {
   if (!supabase) {
     throw new Error('Supabase not initialized. Call initSupabase() first.');
@@ -44,11 +35,6 @@ export function getSupabase() {
 
 // ============ Profile Lookups ============
 
-/**
- * Find a profile by their X/Twitter username
- * @param {string} xUsername - Twitter username (without @)
- * @returns {Promise<object|null>} Profile object or null
- */
 export async function getProfileByXUsername(xUsername) {
   const cleanUsername = xUsername.replace('@', '').toLowerCase();
   
@@ -67,11 +53,6 @@ export async function getProfileByXUsername(xUsername) {
   return data;
 }
 
-/**
- * Find a profile by their MoniPay PayTag
- * @param {string} payTag - PayTag (with or without @)
- * @returns {Promise<object|null>} Profile object or null
- */
 export async function getProfileByMonitag(payTag) {
   const cleanTag = payTag.replace('@', '').toLowerCase();
 
@@ -89,11 +70,6 @@ export async function getProfileByMonitag(payTag) {
   return data;
 }
 
-/**
- * Get profile by wallet address
- * @param {string} walletAddress - Ethereum wallet address
- * @returns {Promise<object|null>} Profile object or null
- */
 export async function getProfileByWallet(walletAddress) {
   const { data, error } = await supabase
     .from('profiles')
@@ -111,13 +87,6 @@ export async function getProfileByWallet(walletAddress) {
 
 // ============ Deduplication Checks ============
 
-/**
- * Check if a grant has already been issued for this campaign + profile
- * This is a fast DB check before the on-chain check
- * @param {string} campaignId - Campaign ID (tweet ID)
- * @param {string} profileId - Profile UUID
- * @returns {Promise<boolean>} True if already granted
- */
 export async function checkIfAlreadyGranted(campaignId, profileId) {
   const { data, error } = await supabase
     .from('campaign_grants')
@@ -128,18 +97,12 @@ export async function checkIfAlreadyGranted(campaignId, profileId) {
   
   if (error) {
     console.error(`❌ Error checking grant status:`, error.message);
-    return false; // Fail open - let on-chain check handle it
+    return false;
   }
   
   return !!data;
 }
 
-/**
- * Check if a specific tweet command has already been processed
- * Prevents double payments on bot restarts/redeploys
- * @param {string} tweetId - Tweet ID
- * @returns {Promise<boolean>} True if already processed
- */
 export async function checkIfCommandProcessed(tweetId) {
   const { data, error } = await supabase
     .from('monibot_transactions')
@@ -149,20 +112,14 @@ export async function checkIfCommandProcessed(tweetId) {
   
   if (error) {
     console.error(`❌ Error checking command status:`, error.message);
-    return false; // Fail open - let on-chain check handle it
+    return false;
   }
   
-  // Return true if any row exists for this tweet_id
   return data && data.length > 0;
 }
 
 // ============ State Updates ============
 
-/**
- * Mark a campaign grant as issued in the database
- * @param {string} campaignId - Campaign ID (tweet ID)
- * @param {string} profileId - Profile UUID
- */
 export async function markAsGranted(campaignId, profileId) {
   const { error } = await supabase
     .from('campaign_grants')
@@ -179,22 +136,6 @@ export async function markAsGranted(campaignId, profileId) {
 
 // ============ Transaction Logging ============
 
-/**
- * Log a transaction to monibot_transactions
- * This is the "Silent Worker" output - the Social Agent reads this table
- * 
- * Error codes in tx_hash field (for failed transactions):
- * - ERROR_TARGET_NOT_FOUND: Recipient PayTag not found in database
- * - ERROR_ALLOWANCE: Sender has insufficient allowance to MoniBotRouter
- * - ERROR_BALANCE: Sender has insufficient USDC balance
- * - ERROR_DUPLICATE_TWEET: Tweet already processed (on-chain check)
- * - ERROR_DUPLICATE_GRANT: Grant already issued for this campaign+recipient
- * - ERROR_TREASURY_EMPTY: MoniBotRouter contract has insufficient USDC for grants
- * - ERROR_BLOCKCHAIN: Generic blockchain/network error
- * - LIMIT_REACHED: Campaign reached max participants (not an error, just "too late")
- * 
- * @param {object} params - Transaction parameters
- */
 export async function logTransaction({ 
   sender_id, 
   receiver_id, 
@@ -207,7 +148,6 @@ export async function logTransaction({
   payer_pay_tag = null,
   recipient_pay_tag = null
 }) {
-  // Determine status based on tx_hash
   const isError = tx_hash.startsWith('ERROR_');
   const isLimitReached = tx_hash === 'LIMIT_REACHED';
   
@@ -220,17 +160,16 @@ export async function logTransaction({
     fee,
     tx_hash,
     campaign_id,
-    type,                // 'grant' or 'p2p_command'
-    tweet_id,            // ID of the tweet to be replied to
-    payer_pay_tag,       // PayTag of the sender (for display)
-    recipient_pay_tag,   // PayTag of the recipient (for display)
-    replied: false,      // Handshake flag for Social Agent
-    status,              // 'completed', 'failed', or 'limit_reached'
-    retry_count: 0,      // For VP-Social retry handling
+    type,
+    tweet_id,
+    payer_pay_tag,
+    recipient_pay_tag,
+    replied: false,
+    status,
+    retry_count: 0,
     created_at: new Date().toISOString()
   };
   
-  // Add error_reason for failed transactions
   if (isError) {
     insertData.error_reason = tx_hash;
   }
@@ -243,16 +182,12 @@ export async function logTransaction({
     console.error('❌ Database log error:', error.message);
   } else {
     const emoji = isError ? '⚠️' : (isLimitReached ? '⏰' : '💾');
-    console.log(`${emoji} Transaction logged: ${type} | ${tx_hash.substring(0, 20)}... | To: @${recipient_pay_tag || 'unknown'}`);
+    console.log(`${emoji} [BSC] Transaction logged: ${type} | ${tx_hash.substring(0, 20)}... | To: @${recipient_pay_tag || 'unknown'}`);
   }
 }
 
 // ============ Campaign Management ============
 
-/**
- * Get all active campaigns
- * @returns {Promise<array>} Array of active campaign objects
- */
 export async function getActiveCampaigns() {
   const { data, error } = await supabase
     .from('campaigns')
@@ -269,11 +204,6 @@ export async function getActiveCampaigns() {
   return data || [];
 }
 
-/**
- * Get active campaign by tweet ID
- * @param {string} tweetId - Campaign tweet ID
- * @returns {Promise<object|null>} Campaign object or null
- */
 export async function getCampaignByTweetId(tweetId) {
   const { data, error } = await supabase
     .from('campaigns')
@@ -290,13 +220,7 @@ export async function getCampaignByTweetId(tweetId) {
   return data;
 }
 
-/**
- * Increment campaign participants count after a successful grant
- * @param {string} tweetId - Campaign tweet ID
- * @param {number} grantAmount - Amount granted
- */
 export async function incrementCampaignParticipants(tweetId, grantAmount) {
-  // Fetch current campaign by tweet_id
   const { data: campaign, error: fetchError } = await supabase
     .from('campaigns')
     .select('id, current_participants, budget_spent, max_participants, budget_allocated')
@@ -311,7 +235,6 @@ export async function incrementCampaignParticipants(tweetId, grantAmount) {
   const newParticipants = (campaign.current_participants || 0) + 1;
   const newBudgetSpent = (campaign.budget_spent || 0) + grantAmount;
   
-  // Check if campaign should be auto-completed
   const shouldComplete = 
     (campaign.max_participants && newParticipants >= campaign.max_participants) ||
     (campaign.budget_allocated && newBudgetSpent >= campaign.budget_allocated);
@@ -326,7 +249,6 @@ export async function incrementCampaignParticipants(tweetId, grantAmount) {
     updateData.completed_at = new Date().toISOString();
   }
   
-  // Update stats
   const { error: updateError } = await supabase
     .from('campaigns')
     .update(updateData)
@@ -340,9 +262,6 @@ export async function incrementCampaignParticipants(tweetId, grantAmount) {
   }
 }
 
-/**
- * Check and auto-complete campaigns that have reached limits
- */
 export async function checkAndCompleteCampaigns() {
   const { data: activeCampaigns, error } = await supabase
     .from('campaigns')
@@ -358,19 +277,16 @@ export async function checkAndCompleteCampaigns() {
     let shouldComplete = false;
     let reason = '';
     
-    // Check participant limit
     if (campaign.max_participants && campaign.current_participants >= campaign.max_participants) {
       shouldComplete = true;
       reason = 'max_participants';
     }
     
-    // Check budget limit
     if (campaign.budget_allocated && campaign.budget_spent >= campaign.budget_allocated) {
       shouldComplete = true;
       reason = 'budget_exhausted';
     }
     
-    // Check expiry
     if (campaign.expires_at && new Date(campaign.expires_at) < new Date()) {
       shouldComplete = true;
       reason = 'expired';
@@ -392,13 +308,7 @@ export async function checkAndCompleteCampaigns() {
   }
 }
 
-/**
- * Update campaign stats after a grant (by campaign UUID)
- * @param {string} campaignId - Campaign UUID
- * @param {number} grantAmount - Amount granted
- */
 export async function updateCampaignStats(campaignId, grantAmount) {
-  // Fetch current stats
   const { data: campaign, error: fetchError } = await supabase
     .from('campaigns')
     .select('current_participants, budget_spent')
@@ -410,7 +320,6 @@ export async function updateCampaignStats(campaignId, grantAmount) {
     return;
   }
   
-  // Update stats
   const { error: updateError } = await supabase
     .from('campaigns')
     .update({
@@ -426,12 +335,6 @@ export async function updateCampaignStats(campaignId, grantAmount) {
 
 // ============ Transaction Sync to Main Ledger ============
 
-/**
- * Sync a MoniBot transaction to the main transactions table
- * This ensures users see grants/p2p in their normal transaction history
- * 
- * @param {object} params - Transaction parameters
- */
 export async function syncToMainLedger({
   senderWalletAddress,
   receiverWalletAddress,
@@ -466,7 +369,8 @@ export async function syncToMainLedger({
           monibotType,
           tweetId,
           campaignId,
-          campaignName
+          campaignName,
+          network: 'bsc' // Network identification for multi-chain tracking
         }),
       }
     );
@@ -475,22 +379,16 @@ export async function syncToMainLedger({
       const errorText = await response.text();
       console.error('      ❌ Sync to main ledger failed:', errorText);
     } else {
-      console.log('      📋 Synced to main transactions ledger');
+      console.log('      📋 Synced to main transactions ledger [BSC]');
     }
   } catch (error) {
     console.error('      ❌ Sync error:', error.message);
-    // Don't throw - this is a non-critical operation
   }
 }
 
 // ============ Mission Stats ============
 
-/**
- * Update MoniBot mission stats after a successful transaction
- * @param {number} amount - Amount spent
- */
 export async function updateMissionStats(amount) {
-  // Get current stats (assuming single row with id=1)
   const { data: stats, error: fetchError } = await supabase
     .from('monibot_mission_stats')
     .select('*')
@@ -502,7 +400,6 @@ export async function updateMissionStats(amount) {
     return;
   }
   
-  // Update spent budget
   const { error: updateError } = await supabase
     .from('monibot_mission_stats')
     .update({
