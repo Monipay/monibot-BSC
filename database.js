@@ -1,9 +1,8 @@
 /**
  * MoniBot BSC Worker - Database Module (Supabase)
  * 
- * Identical to Base worker - shared database, same tables.
- * All BSC transactions are logged to the same monibot_transactions table.
- * Network identification is injected via metadata in the transaction log.
+ * BSC variant - all transactions logged with chain='BSC'.
+ * Campaigns filtered by network='bsc'.
  * 
  * Uses SERVICE_KEY (not anon key) to bypass RLS policies.
  */
@@ -108,6 +107,7 @@ export async function checkIfCommandProcessed(tweetId) {
     .from('monibot_transactions')
     .select('id')
     .eq('tweet_id', tweetId)
+    .eq('chain', 'BSC')
     .limit(1);
   
   if (error) {
@@ -136,6 +136,9 @@ export async function markAsGranted(campaignId, profileId) {
 
 // ============ Transaction Logging ============
 
+/**
+ * Log a transaction to monibot_transactions with chain='BSC'
+ */
 export async function logTransaction({ 
   sender_id, 
   receiver_id, 
@@ -167,6 +170,7 @@ export async function logTransaction({
     replied: false,
     status,
     retry_count: 0,
+    chain: 'BSC', // ← CRITICAL: Identify as BSC transaction
     created_at: new Date().toISOString()
   };
   
@@ -188,16 +192,20 @@ export async function logTransaction({
 
 // ============ Campaign Management ============
 
+/**
+ * Get active campaigns filtered by BSC network
+ */
 export async function getActiveCampaigns() {
   const { data, error } = await supabase
     .from('campaigns')
     .select('*')
     .eq('status', 'active')
+    .eq('network', 'bsc')
     .order('created_at', { ascending: false })
     .limit(10);
   
   if (error) {
-    console.error('❌ Error fetching active campaigns:', error.message);
+    console.error('❌ Error fetching active BSC campaigns:', error.message);
     return [];
   }
   
@@ -266,7 +274,8 @@ export async function checkAndCompleteCampaigns() {
   const { data: activeCampaigns, error } = await supabase
     .from('campaigns')
     .select('*')
-    .eq('status', 'active');
+    .eq('status', 'active')
+    .eq('network', 'bsc');
   
   if (error || !activeCampaigns) {
     console.error('Error checking campaigns:', error?.message);
@@ -302,34 +311,9 @@ export async function checkAndCompleteCampaigns() {
         .eq('id', campaign.id);
       
       if (!updateError) {
-        console.log(`📊 Campaign ${campaign.id.substring(0, 8)} completed (${reason})`);
+        console.log(`📊 [BSC] Campaign ${campaign.id.substring(0, 8)} completed (${reason})`);
       }
     }
-  }
-}
-
-export async function updateCampaignStats(campaignId, grantAmount) {
-  const { data: campaign, error: fetchError } = await supabase
-    .from('campaigns')
-    .select('current_participants, budget_spent')
-    .eq('id', campaignId)
-    .single();
-  
-  if (fetchError || !campaign) {
-    console.error(`❌ Error fetching campaign stats:`, fetchError?.message);
-    return;
-  }
-  
-  const { error: updateError } = await supabase
-    .from('campaigns')
-    .update({
-      current_participants: (campaign.current_participants || 0) + 1,
-      budget_spent: (campaign.budget_spent || 0) + grantAmount
-    })
-    .eq('id', campaignId);
-  
-  if (updateError) {
-    console.error(`❌ Error updating campaign stats:`, updateError.message);
   }
 }
 
@@ -370,7 +354,7 @@ export async function syncToMainLedger({
           tweetId,
           campaignId,
           campaignName,
-          network: 'bsc' // Network identification for multi-chain tracking
+          network: 'bsc'
         }),
       }
     );
