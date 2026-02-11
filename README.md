@@ -121,4 +121,30 @@ ENABLE_P2P_COMMANDS=true
 
 ---
 
+## 🔀 Network Routing (Keyword Detection)
+
+The BSC worker only processes tweets that contain BSC-related keywords. All other tweets are handled by the Base worker (default).
+
+### Keywords
+`usdt`, `bnb`, `bsc`, `binance`, `binance smart chain`
+
+### How It Works
+
+| Command | Handled By |
+|---------|-----------|
+| `@monibot send $5 usdt to @alice` | ✅ **BSC Worker** (keyword: `usdt`) |
+| `@monibot send $5 to @alice` | ❌ Base Worker (no BSC keyword) |
+| `@monibot pay @bob $10 on bsc` | ✅ **BSC Worker** (keyword: `bsc`) |
+| `@monibot send $5 bnb to @alice` | ✅ **BSC Worker** (keyword: `bnb`) |
+
+### P2P Commands
+- The BSC bot's Twitter search query includes BSC keywords: `@monibot (send OR pay) (usdt OR bnb OR bsc OR binance) -is:retweet`
+- Only tweets matching this query are picked up by the BSC worker.
+
+### Campaigns
+- The BSC bot checks for BSC keywords in either the campaign message or the reply text.
+- If neither contains a BSC keyword, the reply is skipped (Base bot handles it).
+
+---
+
 **Built with 💙 on BNB Smart Chain**
