@@ -53,6 +53,19 @@ export function initTwitterClient() {
   console.log('✅ Twitter client initialized (Silent Worker Mode - BSC Router)');
 }
 
+// ============ BSC Keyword Detection ============
+
+const BSC_KEYWORDS = ['usdt', 'bnb', 'bsc', 'binance smart chain', 'binance'];
+
+/**
+ * Check if tweet text contains BSC-related keywords.
+ * BSC bot only processes tweets that mention these keywords.
+ */
+function isBscRelated(text) {
+  const lower = text.toLowerCase();
+  return BSC_KEYWORDS.some(kw => lower.includes(kw));
+}
+
 // ============ Utility Functions ============
 
 function extractFirstPayTag(text) {
@@ -151,6 +164,12 @@ async function processReply(reply, author, campaign) {
     if (alreadyHandled) return;
 
     console.log(`\n📝 [BSC] Processing reply from @${author.username}: "${reply.text.substring(0, 50)}..."`);
+    
+    // BSC bot only processes campaign replies with BSC keywords in the reply or campaign message
+    if (!isBscRelated(reply.text) && !isBscRelated(campaign.message || '')) {
+      console.log('   ⏭️ No BSC keywords found, skipping (Base bot will handle).');
+      return;
+    }
     
     const targetPayTag = extractFirstPayTag(reply.text);
     if (!targetPayTag) {
@@ -354,7 +373,7 @@ export async function pollCommands() {
     console.log('💬 [BSC] Polling for P2P commands...');
     
     const searchParams = {
-      query: '@monibot (send OR pay) -is:retweet',
+      query: '@monibot (send OR pay) (usdt OR bnb OR bsc OR binance) -is:retweet',
       max_results: 50,
       'tweet.fields': ['author_id', 'created_at'],
       'user.fields': ['username'],
