@@ -1,8 +1,10 @@
 /**
  * MoniBot BSC Worker - Twitter Module (Silent Worker Mode)
  * 
- * Identical logic to Base worker but imports from BSC blockchain module.
- * Uses USDT balance/allowance checks instead of USDC.
+ * BSC variant of the Silent Worker.
+ * - Campaigns: Processes ONLY campaigns with network='bsc' (no keyword filter on replies)
+ * - P2P: Only processes tweets with BSC keywords (usdt/bnb/bsc/binance)
+ * - All transactions logged with chain='BSC' via database.js
  */
 
 import { TwitterApi } from 'twitter-api-v2';
@@ -53,14 +55,10 @@ export function initTwitterClient() {
   console.log('✅ Twitter client initialized (Silent Worker Mode - BSC Router)');
 }
 
-// ============ BSC Keyword Detection ============
+// ============ BSC Keyword Detection (P2P only) ============
 
 const BSC_KEYWORDS = ['usdt', 'bnb', 'bsc', 'binance smart chain', 'binance'];
 
-/**
- * Check if tweet text contains BSC-related keywords.
- * BSC bot only processes tweets that mention these keywords.
- */
 function isBscRelated(text) {
   const lower = text.toLowerCase();
   return BSC_KEYWORDS.some(kw => lower.includes(kw));
@@ -84,29 +82,26 @@ function extractPayTags(text) {
     .filter(m => m !== 'monibot' && m !== 'monipay'); 
 }
 
-async function getBotUserId() {
-  try {
-    const me = await twitterClient.v2.me();
-    return me.data.id;
-  } catch (error) {
-    return process.env.TWITTER_BOT_USER_ID;
-  }
-}
+// ============ Loop 1: Campaign Replies (DB-Driven, Network-Filtered) ============
 
-// ============ Loop 1: Campaign Replies (DB-Driven) ============
-
+/**
+ * Fetches active BSC campaigns from DB and searches for replies.
+ * NO keyword filter on replies — any valid monitag gets a grant.
+ * Network routing is handled by the campaigns.network column.
+ */
 export async function pollCampaigns() {
   try {
     console.log('📊 [BSC] Polling for campaign replies...');
     
+    // getActiveCampaigns() already filters by network='bsc'
     const activeCampaigns = await getActiveCampaigns();
     
     if (!activeCampaigns || activeCampaigns.length === 0) {
-      console.log('   No active campaigns found.');
+      console.log('   No active BSC campaigns found.');
       return;
     }
     
-    console.log(`   Found ${activeCampaigns.length} active campaign(s)`);
+    console.log(`   Found ${activeCampaigns.length} active BSC campaign(s)`);
     
     for (const campaign of activeCampaigns) {
       if (campaign.current_participants >= (campaign.max_participants || 999999)) {
@@ -130,7 +125,7 @@ export async function pollCampaigns() {
 async function processCampaignReplies(campaign) {
   try {
     console.log(`\n🔍 [BSC] Checking campaign: ${campaign.tweet_id}`);
-    console.log(`   Grant: $${campaign.grant_amount} | ${campaign.current_participants || 0}/${campaign.max_participants || '∞'} participants`);
+    console.log(`   Grant: $${campaign.grant_amount} USDT | ${campaign.current_participants || 0}/${campaign.max_participants || '∞'} participants`);
     
     const replies = await twitterClient.v2.search({
       query: `conversation_id:${campaign.tweet_id} -from:monibot`,
@@ -165,11 +160,9 @@ async function processReply(reply, author, campaign) {
 
     console.log(`\n📝 [BSC] Processing reply from @${author.username}: "${reply.text.substring(0, 50)}..."`);
     
-    // BSC bot only processes campaign replies with BSC keywords in the reply or campaign message
-    if (!isBscRelated(reply.text) && !isBscRelated(campaign.message || '')) {
-      console.log('   ⏭️ No BSC keywords found, skipping (Base bot will handle).');
-      return;
-    }
+    // NO BSC keyword filter for campaigns!
+    // Network routing is handled by campaigns.network='bsc' column.
+    // Any valid monitag reply gets a grant.
     
     const targetPayTag = extractFirstPayTag(reply.text);
     if (!targetPayTag) {
@@ -366,7 +359,7 @@ async function processGrantForPayTag(payTag, reply, author, campaign) {
   }
 }
 
-// ============ Loop 2: P2P Commands ============
+// ============ Loop 2: P2P Commands (BSC Keywords Required) ============
 
 export async function pollCommands() {
   try {
