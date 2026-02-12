@@ -474,8 +474,8 @@ async function processP2PCommand(tweet, author) {
     
     // === Single Recipient ===
     
-    const sendMatch = tweet.text.match(/send\s+\$?(\d+\.?\d*)\s+to\s+@?([a-zA-Z0-9_-]+)/i);
-    const payMatch = tweet.text.match(/pay\s+@?([a-zA-Z0-9_-]+)\s+\$?(\d+\.?\d*)/i);
+    const sendMatch = tweet.text.match(/send\s+\$?(\d+\.?\d*)\s*(?:usdt|usdc|bnb|bsc)?\s+to\s+@?([a-zA-Z0-9_-]+)/i);
+    const payMatch = tweet.text.match(/pay\s+@?([a-zA-Z0-9_-]+)\s+\$?(\d+\.?\d*)\s*(?:usdt|usdc|bnb|bsc)?/i);
     
     let amount, targetPayTag;
     
