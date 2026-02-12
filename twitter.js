@@ -36,6 +36,8 @@ import {
   executeMultiRecipientP2P,
   buildMultiRecipientReply
 } from './multiRecipient.js';
+import { checkBaseFunds } from './crossChainCheck.js';
+import { createScheduledJob } from './scheduler.js';
 
 let twitterClient;
 let lastProcessedTweetId = null;
@@ -547,7 +549,43 @@ async function processP2PCommand(tweet, author) {
 
     const allowance = await getOnchainAllowance(senderProfile.wallet_address);
     if (allowance < amount) {
-      console.log(`   ❌ Insufficient Allowance: Need $${amount}, approved $${allowance}`);
+      console.log(`   ❌ Insufficient Allowance on BSC: Need $${amount}, approved $${allowance}`);
+      
+      // === Balance-Aware Routing: Check Base ===
+      const baseCheck = await checkBaseFunds(senderProfile.wallet_address, amount);
+      if (baseCheck.hasBalance && baseCheck.hasAllowance) {
+        console.log(`   🔀 Cross-chain routing: Base has $${baseCheck.balance} USDC, allowance $${baseCheck.allowance}. Deferring to Base worker.`);
+        await createScheduledJob({
+          type: 'cross_chain_p2p',
+          scheduledAt: new Date(),
+          payload: {
+            chain: 'base',
+            senderProfileId: senderProfile.id,
+            senderWalletAddress: senderProfile.wallet_address,
+            senderPayTag: senderProfile.pay_tag,
+            targetPayTag,
+            amount,
+            originalChain: 'bsc',
+            reason: 'allowance'
+          },
+          sourceTweetId: tweet.id,
+          sourceAuthorId: author.id,
+          sourceAuthorUsername: author.username
+        });
+        await logTransaction({
+          sender_id: senderProfile.id,
+          receiver_id: senderProfile.id,
+          amount: 0,
+          fee: 0,
+          tx_hash: 'DEFERRED_TO_BASE',
+          type: 'p2p_command',
+          tweet_id: tweet.id,
+          payer_pay_tag: senderProfile.pay_tag,
+          recipient_pay_tag: targetPayTag
+        });
+        return;
+      }
+      
       await logTransaction({
         sender_id: senderProfile.id,
         receiver_id: senderProfile.id,
@@ -564,7 +602,43 @@ async function processP2PCommand(tweet, author) {
 
     const balance = await getUSDTBalance(senderProfile.wallet_address);
     if (balance < amount) {
-      console.log(`   ❌ Insufficient Balance: Need $${amount}, have $${balance}`);
+      console.log(`   ❌ Insufficient Balance on BSC: Need $${amount}, have $${balance}`);
+      
+      // === Balance-Aware Routing: Check Base ===
+      const baseCheck2 = await checkBaseFunds(senderProfile.wallet_address, amount);
+      if (baseCheck2.hasBalance && baseCheck2.hasAllowance) {
+        console.log(`   🔀 Cross-chain routing: Base has $${baseCheck2.balance} USDC, allowance $${baseCheck2.allowance}. Deferring to Base worker.`);
+        await createScheduledJob({
+          type: 'cross_chain_p2p',
+          scheduledAt: new Date(),
+          payload: {
+            chain: 'base',
+            senderProfileId: senderProfile.id,
+            senderWalletAddress: senderProfile.wallet_address,
+            senderPayTag: senderProfile.pay_tag,
+            targetPayTag,
+            amount,
+            originalChain: 'bsc',
+            reason: 'balance'
+          },
+          sourceTweetId: tweet.id,
+          sourceAuthorId: author.id,
+          sourceAuthorUsername: author.username
+        });
+        await logTransaction({
+          sender_id: senderProfile.id,
+          receiver_id: senderProfile.id,
+          amount: 0,
+          fee: 0,
+          tx_hash: 'DEFERRED_TO_BASE',
+          type: 'p2p_command',
+          tweet_id: tweet.id,
+          payer_pay_tag: senderProfile.pay_tag,
+          recipient_pay_tag: targetPayTag
+        });
+        return;
+      }
+      
       await logTransaction({
         sender_id: senderProfile.id,
         receiver_id: senderProfile.id,
