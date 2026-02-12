@@ -368,7 +368,7 @@ export async function pollCommands() {
     const searchParams = {
       query: '@monibot (send OR pay) (usdt OR bnb OR bsc OR binance) -is:retweet',
       max_results: 50,
-      'tweet.fields': ['author_id', 'created_at'],
+      'tweet.fields': ['author_id', 'created_at', 'referenced_tweets'],
       'user.fields': ['username'],
       expansions: ['author_id']
     };
@@ -400,6 +400,28 @@ async function processP2PCommand(tweet, author) {
   try {
     const alreadyHandled = await checkIfCommandProcessed(tweet.id);
     if (alreadyHandled) return;
+
+    // Smart Command Detection: If this is a quote tweet, only process if
+    // the author's own text contains a direct command pattern
+    const isQuote = tweet.referenced_tweets?.some(r => r.type === 'quoted');
+    if (isQuote) {
+      const hasDirectCommand = /(?:send\s+\$?\d|pay\s+@?\w+\s+\$?\d)/i.test(tweet.text);
+      if (!hasDirectCommand) {
+        console.log(`   ⏭️ Quote tweet is discussion/announcement, not a command. Skipping.`);
+        await logTransaction({
+          sender_id: process.env.MONIBOT_PROFILE_ID,
+          receiver_id: process.env.MONIBOT_PROFILE_ID,
+          amount: 0,
+          fee: 0,
+          tx_hash: 'SKIP_QUOTE_NOT_COMMAND',
+          type: 'p2p_command',
+          tweet_id: tweet.id,
+          payer_pay_tag: author.username,
+          recipient_pay_tag: null
+        });
+        return;
+      }
+    }
 
     const tweetAlreadyOnChain = await isTweetProcessed(tweet.id);
     if (tweetAlreadyOnChain) {
