@@ -443,6 +443,25 @@ async function processP2PCommand(tweet, author) {
     }
 
     console.log(`\n⚡ [BSC] Processing P2P command from @${author.username}`);
+
+    // Skip Tempo-tagged tweets — Tempo bot handles those
+    const TEMPO_KEYWORDS = ['on tempo', 'tempo', 'alphausd', 'αusd'];
+    const isTempoRelated = TEMPO_KEYWORDS.some(kw => tweet.text.toLowerCase().includes(kw));
+    if (isTempoRelated) {
+      console.log(`   ⏭️ SKIP_TEMPO_NETWORK: Tempo keywords detected, deferring to Tempo worker.`);
+      await logTransaction({
+        sender_id: process.env.MONIBOT_PROFILE_ID,
+        receiver_id: process.env.MONIBOT_PROFILE_ID,
+        amount: 0,
+        fee: 0,
+        tx_hash: 'SKIP_TEMPO_NETWORK',
+        type: 'p2p_command',
+        tweet_id: tweet.id,
+        payer_pay_tag: author.username,
+        recipient_pay_tag: null
+      });
+      return;
+    }
     
     // === Multi-Recipient Detection ===
     if (isMultiRecipientCommand(tweet.text)) {
