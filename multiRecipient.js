@@ -115,12 +115,11 @@ export async function executeMultiRecipientP2P({ senderProfile, amount, recipien
         uniqueTweetId
       );
       
-      const netAmount = amount - actualFee;
-      
+      // Log full commanded amount, fee separate (fee-on-top model)
       await logTransaction({
         sender_id: senderProfile.id,
         receiver_id: profile.id,
-        amount: netAmount,
+        amount: amount,
         fee: actualFee,
         tx_hash: hash,
         type: 'p2p_command',
@@ -134,7 +133,7 @@ export async function executeMultiRecipientP2P({ senderProfile, amount, recipien
         receiverWalletAddress: profile.wallet_address,
         senderPayTag: senderProfile.pay_tag,
         receiverPayTag: profile.pay_tag,
-        amount: netAmount,
+        amount: amount,
         fee: actualFee,
         txHash: hash,
         monibotType: 'p2p',
